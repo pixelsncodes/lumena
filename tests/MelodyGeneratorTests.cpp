@@ -26,6 +26,7 @@ using lumena::melody::kMaxVelocity;
 using lumena::melody::kMinVelocity;
 using lumena::melody::Melody;
 using lumena::melody::MelodyOptions;
+using lumena::melody::PhraseMode;
 using lumena::melody::RhythmMode;
 using lumena::midi::MidiFileWriter;
 using lumena::midi::MidiSequence;
@@ -54,8 +55,28 @@ Image makeDiagonalGradient(int width, int height) {
     return Image(width, height, std::move(pixels));
 }
 
+// A uniformly bright image: every cell reads ~1.0, so arpeggio ornaments (which
+// prefer cells brighter than 0.7) always have a valid trigger site.
+Image makeBright(int width, int height) {
+    std::vector<std::uint8_t> pixels(
+        static_cast<std::size_t>(width) * height * 4, 255);
+    return Image(width, height, std::move(pixels));
+}
+
 Scale minorPentatonic() {
     return Scale{"A Minor Pentatonic", 57, {0, 3, 5, 7, 10}};
+}
+
+// The scale-degree deltas within a phrase [begin, end) of the degree track.
+// Transposing a motif preserves these, so two phrases sharing a delta signature
+// are the same motif (possibly transposed).
+std::vector<int> phraseDeltas(const std::vector<int>& degrees, std::size_t begin,
+                              std::size_t end) {
+    std::vector<int> deltas;
+    for (std::size_t i = begin + 1; i < end; ++i) {
+        deltas.push_back(degrees[i] - degrees[i - 1]);
+    }
+    return deltas;
 }
 
 // Walks the serialised MIDI file and collects every note-on velocity byte. The
@@ -104,6 +125,7 @@ void test_random_walk_is_smooth() {
 
     MelodyOptions opts;
     opts.length = 32;
+    opts.phraseMode = PhraseMode::Freeform;  // flat stream: no phrase structure
     opts.rhythm = RhythmMode::Flowing;
     opts.cellPath = CellPath::RandomWalk;  // default, made explicit
     opts.brightnessBias = 0.25;            // default, made explicit
@@ -143,6 +165,7 @@ void test_velocity_mapping_in_bytes() {
 
     MelodyOptions opts;
     opts.length = 48;
+    opts.phraseMode = PhraseMode::Freeform;  // exact one-note-per-step stream
     std::mt19937 rng(7u);
     const Melody melody = generateMelody(grid, scale, opts, rng);
     CHECK(!melody.notes.empty());
@@ -183,6 +206,7 @@ void test_rhythm_modes() {
     {
         MelodyOptions opts;
         opts.length = 40;
+        opts.phraseMode = PhraseMode::Freeform;
         opts.rhythm = RhythmMode::Straight;
         std::mt19937 rng(3u);
         const Melody melody = generateMelody(grid, scale, opts, rng);
@@ -198,6 +222,7 @@ void test_rhythm_modes() {
     {
         MelodyOptions opts;
         opts.length = 64;
+        opts.phraseMode = PhraseMode::Freeform;
         opts.rhythm = RhythmMode::Flowing;
         std::mt19937 rng(4u);
         const Melody melody = generateMelody(grid, scale, opts, rng);
@@ -227,6 +252,7 @@ void test_length_and_pure_random() {
     {
         MelodyOptions opts;
         opts.length = 0;
+        opts.phraseMode = PhraseMode::Freeform;
         std::mt19937 rng(1u);
         const Melody melody = generateMelody(grid, scale, opts, rng);
         CHECK(melody.notes.size() == grid.cellCount());
@@ -236,6 +262,7 @@ void test_length_and_pure_random() {
     {
         MelodyOptions opts;
         opts.length = 24;
+        opts.phraseMode = PhraseMode::Freeform;
         opts.cellPath = CellPath::PureRandom;
         std::mt19937 rng(2u);
         const Melody melody = generateMelody(grid, scale, opts, rng);
@@ -268,6 +295,164 @@ void test_reproducible() {
     CHECK(sameNotes);
 }
 
+// ---- phrased mode: a motif is repeated (as a transposed repeat) -------------
+
+void test_phrased_repeats_motif() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = minorPentatonic();
+
+    MelodyOptions opts;
+    opts.length = 32;
+    opts.phraseMode = PhraseMode::Phrased;
+    opts.arpeggioAmount = 0.0;  // keep phrase note counts exact for comparison
+
+    std::mt19937 rng(2024u);
+    const Melody melody = generateMelody(grid, scale, opts, rng);
+
+    // Phrased mode records phrase boundaries; there must be at least A, A', B
+    // and a closing phrase.
+    CHECK(melody.phraseStarts.size() >= 4);
+    CHECK(melody.notes.size() == melody.degrees.size());
+
+    // The motif is phrase 0; the varied repeat A' is phrase 1. A' is a
+    // transposition of A, so their scale-degree deltas match exactly.
+    const std::vector<std::size_t>& starts = melody.phraseStarts;
+    const std::vector<int> motif = phraseDeltas(melody.degrees, starts[0], starts[1]);
+    CHECK(!motif.empty());
+
+    bool foundRepeat = false;
+    for (std::size_t p = 1; p + 1 < starts.size(); ++p) {
+        const std::vector<int> other =
+            phraseDeltas(melody.degrees, starts[p], starts[p + 1]);
+        if (other == motif) {
+            foundRepeat = true;
+            break;
+        }
+    }
+    CHECK(foundRepeat);
+}
+
+// ---- phrased mode: the final note is a tonic held for >= a half note --------
+
+void test_phrased_cadence_on_tonic() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = minorPentatonic();
+
+    // Try several seeds: the cadence must hold regardless of the random walk.
+    for (unsigned seed = 1; seed <= 40; ++seed) {
+        MelodyOptions opts;
+        opts.length = 24;
+        opts.phraseMode = PhraseMode::Phrased;
+
+        std::mt19937 rng(seed);
+        const Melody melody = generateMelody(grid, scale, opts, rng);
+        CHECK(!melody.notes.empty());
+
+        const Note& last = melody.notes.back();
+        const int lastDegree = melody.degrees.back();
+
+        // Tonic: a degree whose pitch class equals the root's (interval 0).
+        const int step =
+            ((lastDegree % static_cast<int>(scale.intervals.size())) +
+             static_cast<int>(scale.intervals.size())) %
+            static_cast<int>(scale.intervals.size());
+        CHECK(scale.intervals[static_cast<std::size_t>(step)] % 12 == 0);
+        // And its MIDI pitch is a whole number of octaves above the root.
+        CHECK((last.noteNumber - scale.rootNote) % 12 == 0);
+        // Held at least a half note.
+        CHECK(last.lengthBeats >= 2.0);
+    }
+}
+
+// ---- phrased mode: rests appear between phrases at ~60% over many seeds ------
+
+void test_phrased_rests_between_phrases() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = minorPentatonic();
+
+    long boundaries = 0;
+    long rested = 0;
+    for (unsigned seed = 1; seed <= 200; ++seed) {
+        MelodyOptions opts;
+        opts.length = 40;
+        opts.phraseMode = PhraseMode::Phrased;
+        opts.arpeggioAmount = 0.0;  // isolate the rest behaviour
+
+        std::mt19937 rng(seed);
+        const Melody melody = generateMelody(grid, scale, opts, rng);
+        const std::vector<std::size_t>& starts = melody.phraseStarts;
+
+        // A rest shows up as a gap between the end of one phrase's last note and
+        // the start of the next phrase's first note.
+        for (std::size_t p = 1; p < starts.size(); ++p) {
+            const std::size_t firstOfPhrase = starts[p];
+            const std::size_t lastOfPrev = firstOfPhrase - 1;
+            const double prevEnd = melody.notes[lastOfPrev].startBeats +
+                                   melody.notes[lastOfPrev].lengthBeats;
+            const double gap = melody.notes[firstOfPhrase].startBeats - prevEnd;
+            ++boundaries;
+            if (gap > 1e-9) ++rested;
+        }
+    }
+
+    CHECK(boundaries > 100);  // enough samples for the rate to converge
+    // Expected ~60%; allow a generous statistical band.
+    const double rate = static_cast<double>(rested) / static_cast<double>(boundaries);
+    CHECK(rate >= 0.50);
+    CHECK(rate <= 0.70);
+}
+
+// ---- phrased mode: arpeggio ornaments stay within the scale -----------------
+
+void test_phrased_arpeggios_in_scale() {
+    // A fully-bright image guarantees ornament trigger sites (cells > 0.7).
+    const Image image = makeBright(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = minorPentatonic();
+
+    // Pitch classes that belong to the scale.
+    std::set<int> scalePcs;
+    for (int iv : scale.intervals) {
+        scalePcs.insert(((iv % 12) + 12) % 12);
+    }
+
+    bool sawArpeggio = false;
+    for (unsigned seed = 1; seed <= 30; ++seed) {
+        MelodyOptions opts;
+        opts.length = 40;
+        opts.phraseMode = PhraseMode::Phrased;
+        opts.arpeggioAmount = 1.0;  // force an ornament in every phrase
+
+        std::mt19937 rng(seed);
+        const Melody melody = generateMelody(grid, scale, opts, rng);
+
+        // Every emitted pitch — arpeggio notes included — must be in the scale.
+        for (const Note& n : melody.notes) {
+            const int pc = ((n.noteNumber - scale.rootNote) % 12 + 12) % 12;
+            CHECK(scalePcs.count(pc) == 1);
+        }
+
+        // Detect an arpeggio figure: three consecutive degrees stepping by a
+        // constant +2 or -2 (the 0-2-4 pentatonic outline) with short (eighth
+        // or triplet) durations.
+        for (std::size_t i = 2; i < melody.degrees.size(); ++i) {
+            const int d1 = melody.degrees[i - 1] - melody.degrees[i - 2];
+            const int d2 = melody.degrees[i] - melody.degrees[i - 1];
+            const bool shaped = (d1 == 2 && d2 == 2) || (d1 == -2 && d2 == -2);
+            const bool shortNotes = melody.notes[i - 2].lengthBeats < 0.6 &&
+                                    melody.notes[i - 1].lengthBeats < 0.6 &&
+                                    melody.notes[i].lengthBeats < 0.6;
+            if (shaped && shortNotes) sawArpeggio = true;
+        }
+    }
+    // With ornaments forced on and bright trigger sites, at least one figure
+    // should have been emitted across all seeds.
+    CHECK(sawArpeggio);
+}
+
 }  // namespace
 
 void run_melody_generator_tests() {
@@ -276,4 +461,8 @@ void run_melody_generator_tests() {
     test_rhythm_modes();
     test_length_and_pure_random();
     test_reproducible();
+    test_phrased_repeats_motif();
+    test_phrased_cadence_on_tonic();
+    test_phrased_rests_between_phrases();
+    test_phrased_arpeggios_in_scale();
 }

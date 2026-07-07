@@ -4,7 +4,8 @@
 // Usage:
 //   lumena_demo <image> [--out melody.mid] [--seed N] [--tempo BPM]
 //                       [--rhythm straight|flowing] [--length N]
-//                       [--cells walk|random]
+//                       [--cells walk|random] [--mode phrased|freeform]
+//                       [--arp 0..1]
 //
 // It runs the full standalone pipeline end to end — image -> brightness grid ->
 // circle-of-fifths key -> theory-weighted Markov walk -> MIDI notes — so it
@@ -32,6 +33,7 @@ using lumena::image::Image;
 using lumena::melody::CellPath;
 using lumena::melody::Melody;
 using lumena::melody::MelodyOptions;
+using lumena::melody::PhraseMode;
 using lumena::melody::RhythmMode;
 using lumena::midi::MidiFileWriter;
 using lumena::midi::MidiSequence;
@@ -51,7 +53,8 @@ void printUsage(const char* argv0) {
     std::fprintf(stderr,
                  "Usage: %s <image> [--out melody.mid] [--seed N] [--tempo BPM]\n"
                  "          [--rhythm straight|flowing] [--length N] "
-                 "[--cells walk|random]\n",
+                 "[--cells walk|random]\n"
+                 "          [--mode phrased|freeform] [--arp 0..1]\n",
                  argv0);
 }
 
@@ -86,6 +89,18 @@ bool parseArgs(int argc, char** argv, Options& opts) {
                 std::fprintf(stderr, "Unknown --cells mode: %s\n", mode.c_str());
                 return false;
             }
+        } else if (arg == "--mode" && i + 1 < argc) {
+            const std::string mode = argv[++i];
+            if (mode == "phrased") {
+                opts.melody.phraseMode = PhraseMode::Phrased;
+            } else if (mode == "freeform") {
+                opts.melody.phraseMode = PhraseMode::Freeform;
+            } else {
+                std::fprintf(stderr, "Unknown --mode: %s\n", mode.c_str());
+                return false;
+            }
+        } else if (arg == "--arp" && i + 1 < argc) {
+            opts.melody.arpeggioAmount = std::strtod(argv[++i], nullptr);
         } else if (arg == "-h" || arg == "--help") {
             return false;
         } else if (!arg.empty() && arg[0] == '-') {
@@ -130,8 +145,10 @@ int main(int argc, char** argv) {
     const Melody melody =
         lumena::melody::generateMelody(grid, detection.scale, opts.melody, rng);
     const std::vector<Note>& notes = melody.notes;
-    std::printf("Generated %zu notes at %.0f BPM (%s rhythm, %s cells)\n",
+    std::printf("Generated %zu notes at %.0f BPM (%s mode, %s rhythm, %s cells)\n",
                 notes.size(), opts.tempo,
+                opts.melody.phraseMode == PhraseMode::Phrased ? "phrased"
+                                                              : "freeform",
                 opts.melody.rhythm == RhythmMode::Flowing ? "flowing" : "straight",
                 opts.melody.cellPath == CellPath::RandomWalk ? "walk" : "random");
 
