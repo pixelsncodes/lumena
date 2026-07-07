@@ -453,6 +453,73 @@ void test_phrased_arpeggios_in_scale() {
     CHECK(sawArpeggio);
 }
 
+// ---- phrased mode: velocity peaks in the interior of every phrase -----------
+
+void test_phrased_dynamics_peak_mid_phrase() {
+    // A uniformly-bright image: brightness is constant, so the phrase contour
+    // alone shapes velocity and its peak must land in the phrase interior — the
+    // loudest note is never the phrase's first or last note.
+    const Image image = makeBright(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = minorPentatonic();
+
+    for (unsigned seed = 1; seed <= 40; ++seed) {
+        MelodyOptions opts;
+        opts.length = 40;
+        opts.phraseMode = PhraseMode::Phrased;
+        opts.arpeggioAmount = 0.0;  // keep phrase note counts simple
+
+        std::mt19937 rng(seed);
+        const Melody melody = generateMelody(grid, scale, opts, rng);
+        const std::vector<std::size_t>& starts = melody.phraseStarts;
+        CHECK(starts.size() >= 4);
+
+        for (std::size_t p = 0; p < starts.size(); ++p) {
+            const std::size_t begin = starts[p];
+            const std::size_t end =
+                (p + 1 < starts.size()) ? starts[p + 1] : melody.notes.size();
+            CHECK(end - begin >= 3);
+
+            int maxV = -1;
+            std::size_t maxAt = begin;
+            for (std::size_t i = begin; i < end; ++i) {
+                if (melody.notes[i].velocity > maxV) {
+                    maxV = melody.notes[i].velocity;
+                    maxAt = i;
+                }
+            }
+            // The loudest note is interior: neither first nor last of the phrase.
+            CHECK(maxAt != begin);
+            CHECK(maxAt != end - 1);
+        }
+    }
+}
+
+// ---- phrased mode: the final tonic is approached by step, not a leap --------
+
+void test_phrased_ending_is_stepwise() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = minorPentatonic();
+
+    for (unsigned seed = 1; seed <= 40; ++seed) {
+        MelodyOptions opts;
+        opts.length = 24;
+        opts.phraseMode = PhraseMode::Phrased;
+
+        std::mt19937 rng(seed);
+        const Melody melody = generateMelody(grid, scale, opts, rng);
+        CHECK(melody.degrees.size() >= 2);
+
+        const std::size_t n = melody.degrees.size();
+        const int delta = melody.degrees[n - 1] - melody.degrees[n - 2];
+        // A single scale step into the tonic (a real step, never a leap or a
+        // repeated note): the two-octave range always leaves room.
+        CHECK(std::abs(delta) >= 1);
+        CHECK(std::abs(delta) <= 2);
+    }
+}
+
 }  // namespace
 
 void run_melody_generator_tests() {
@@ -465,4 +532,6 @@ void run_melody_generator_tests() {
     test_phrased_cadence_on_tonic();
     test_phrased_rests_between_phrases();
     test_phrased_arpeggios_in_scale();
+    test_phrased_dynamics_peak_mid_phrase();
+    test_phrased_ending_is_stepwise();
 }

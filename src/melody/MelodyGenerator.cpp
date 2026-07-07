@@ -49,6 +49,29 @@ constexpr double kCadenceBeats = 2.0;
 // Cells at least this bright are preferred as arpeggio ornament sites.
 constexpr float kArpeggioBrightness = 0.7f;
 
+// ---- phrase-dynamics (contour) constants ------------------------------------
+
+// Velocity a phrase contour reaches at its soft start/taper and at its peak.
+constexpr int kContourVelLow = 62;
+constexpr int kContourVelHigh = 112;
+// How the final velocity blends the phrase contour with the note's own cell
+// brightness (weights sum to 1). Contour dominates so uniformly-bright images
+// no longer come out wall-to-wall fortissimo; brightness still colours it.
+constexpr double kContourWeight = 0.7;
+constexpr double kBrightnessWeight = 0.3;
+// Final velocity is clamped to this window.
+constexpr int kDynamicMin = 35;
+constexpr int kDynamicMax = 115;
+// The arc peaks ~2/3 of the way through a phrase, jittered +/- this much.
+constexpr double kPeakFraction = 2.0 / 3.0;
+constexpr double kPeakJitter = 0.08;
+// Arc height (relative to the peak) a normal phrase eases back to at its close.
+constexpr double kPhraseEndArc = 0.2;
+// The last phrase of the piece is scaled down and tapers fully: a decrescendo.
+constexpr double kFinalPhraseScale = 0.85;
+// Probability an A'/A'' repeat is hoisted up an octave for lift.
+constexpr double kOctaveLiftProbability = 0.25;
+
 }  // namespace
 
 int brightnessToVelocity(float brightness) noexcept {
@@ -200,6 +223,31 @@ public:
         // Land squarely on a tonic for the cadence, approached smoothly.
         const int tonic = nearestDegreeWithPitchClass(static_cast<int>(degree_),
                                                        /*wantFifth=*/false);
+
+        // Ending polish: approach the final tonic by a single scale step from
+        // above or below rather than a leap, whenever the range allows. Retune
+        // the penultimate note to tonic +/- 1, preferring the step nearer to
+        // where the walk already left it so the contour stays smooth.
+        if (!phrase.empty()) {
+            const bool aboveOk = tonic + 1 < totalDegrees_;
+            const bool belowOk = tonic - 1 >= 0;
+            if (aboveOk || belowOk) {
+                PhraseNote& approach = phrase.back();
+                int stepDegree;
+                if (aboveOk && belowOk) {
+                    stepDegree = std::abs((tonic + 1) - approach.degree) <=
+                                         std::abs((tonic - 1) - approach.degree)
+                                     ? tonic + 1
+                                     : tonic - 1;
+                } else {
+                    stepDegree = aboveOk ? tonic + 1 : tonic - 1;
+                }
+                approach.degree = stepDegree;
+                approach.noteNumber =
+                    scale_.noteAt(stepDegree, options_.octaveSpan);
+            }
+        }
+
         degree_ = static_cast<std::size_t>(tonic);
         const float brightness = grid_.valueAt(col_, row_);
         PhraseNote note;
@@ -238,6 +286,22 @@ public:
         for (PhraseNote& n : v) {
             n.degree += delta;
             n.noteNumber = scale_.noteAt(n.degree, options_.octaveSpan);
+        }
+
+        // Octave lift: occasionally hoist the whole repeat up an octave when the
+        // range has room. A classic cheap trick that adds lift and direction;
+        // shifting every note by an octave preserves the motif's interval
+        // content, so A'/A'' stays recognisable.
+        std::uniform_real_distribution<double> lift(0.0, 1.0);
+        if (lift(rng_) < kOctaveLiftProbability) {
+            int hi2 = std::numeric_limits<int>::min();
+            for (const PhraseNote& n : v) hi2 = std::max(hi2, n.degree);
+            if (hi2 + degreesPerOctave_ < totalDegrees_) {
+                for (PhraseNote& n : v) {
+                    n.degree += degreesPerOctave_;
+                    n.noteNumber = scale_.noteAt(n.degree, options_.octaveSpan);
+                }
+            }
         }
 
         // Slight rhythmic variation: retime one note to a neighbouring length.
@@ -307,6 +371,52 @@ public:
         phrase.erase(phrase.begin() + static_cast<std::ptrdiff_t>(site));
         phrase.insert(phrase.begin() + static_cast<std::ptrdiff_t>(site),
                       figure.begin(), figure.end());
+    }
+
+    // Overwrites every note's velocity with a phrase-shaped dynamic contour: a
+    // soft start rising to a peak ~2/3 of the way through, then easing back
+    // down. The contour (weight 0.7) is blended with each note's own cell
+    // brightness (weight 0.3) so colour still tints the dynamics, then clamped.
+    // The peak position is lightly randomised per phrase and kept in the
+    // interior, so the loudest note is never the first or last of the phrase.
+    // The final phrase of the piece is scaled down and tapers fully — a closing
+    // decrescendo — which is why uniformly-bright images no longer play
+    // wall-to-wall fortissimo.
+    void applyPhraseDynamics(std::vector<PhraseNote>& phrase, bool finalPhrase) {
+        if (phrase.empty()) return;
+        const std::size_t n = phrase.size();
+
+        std::uniform_real_distribution<double> jitter(-kPeakJitter, kPeakJitter);
+        double peakFrac = kPeakFraction + jitter(rng_);
+        // Keep the peak strictly interior so the arc never crests on an edge.
+        if (peakFrac < 0.34) peakFrac = 0.34;
+        if (peakFrac > 0.85) peakFrac = 0.85;
+
+        const double endArc = finalPhrase ? 0.0 : kPhraseEndArc;
+        const double scale = finalPhrase ? kFinalPhraseScale : 1.0;
+        const double vspan = kContourVelHigh - kContourVelLow;
+
+        for (std::size_t i = 0; i < n; ++i) {
+            const double t = n > 1 ? static_cast<double>(i) /
+                                         static_cast<double>(n - 1)
+                                   : 0.0;
+            // Arc in [0, 1]: 0 at the start, 1 at the peak, `endArc` at the end.
+            double arc;
+            if (t <= peakFrac) {
+                arc = peakFrac > 0.0 ? t / peakFrac : 1.0;
+            } else {
+                arc = 1.0 - (1.0 - endArc) * ((t - peakFrac) / (1.0 - peakFrac));
+            }
+            const double contourVel = (kContourVelLow + arc * vspan) * scale;
+            const double brightVel =
+                static_cast<double>(brightnessToVelocity(phrase[i].brightness));
+            const double v =
+                kContourWeight * contourVel + kBrightnessWeight * brightVel;
+            int vi = static_cast<int>(std::lround(v));
+            if (vi < kDynamicMin) vi = kDynamicMin;
+            if (vi > kDynamicMax) vi = kDynamicMax;
+            phrase[i].velocity = vi;
+        }
     }
 
     // True at probability `kRestProbability`; the caller inserts a rest.
@@ -450,11 +560,16 @@ Melody generatePhrased(const BrightnessGrid& grid, const Scale& scale,
     // inserting rests at phrase boundaries.
     double beat = 0.0;
     for (std::size_t p = 0; p < phrases.size(); ++p) {
+        const bool finalPhrase = p + 1 == phrases.size();
         // Ornament every phrase but the closing one — the cadence's final tonic
         // must survive intact.
-        if (p + 1 < phrases.size()) {
+        if (!finalPhrase) {
             builder.maybeOrnament(phrases[p]);
         }
+
+        // Shape the phrase's dynamics (after any ornament, so the added figure
+        // notes are shaped too); the last phrase decrescendos.
+        builder.applyPhraseDynamics(phrases[p], finalPhrase);
 
         if (p > 0 && builder.rollRest()) {
             beat += builder.restLength();
