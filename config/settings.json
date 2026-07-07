@@ -1,0 +1,16 @@
+{
+  "grid": {
+    "columns": 16,
+    "rows": 12
+  },
+  "midi": {
+    "rootNote": 60,
+    "octaveRange": 2,
+    "defaultVelocity": 100
+  },
+  "markov": {
+    "order": 1,
+    "temperature": 1.0
+  },
+  "defaultScale": "pentatonic_minor"
+}
