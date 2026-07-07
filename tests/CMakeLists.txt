@@ -4,7 +4,8 @@ add_executable(LumenaTests
     ColorAnalysisTests.cpp
     ScaleTests.cpp
     KeySelectorTests.cpp
-    MarkovTests.cpp)
+    MarkovTests.cpp
+    MidiTests.cpp)
 
 target_link_libraries(LumenaTests
     PRIVATE
@@ -15,6 +16,8 @@ target_link_libraries(LumenaTests
 # regardless of the working directory it is invoked from.
 target_compile_definitions(LumenaTests
     PRIVATE
-        LUMENA_CONFIG_DIR="${CMAKE_SOURCE_DIR}/config")
+        LUMENA_CONFIG_DIR="${CMAKE_SOURCE_DIR}/config"
+        # A writable scratch directory for the MIDI file round-trip test.
+        LUMENA_TEST_TMP_DIR="${CMAKE_CURRENT_BINARY_DIR}")
 
 add_test(NAME LumenaTests COMMAND LumenaTests)

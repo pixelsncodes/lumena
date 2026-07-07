@@ -15,10 +15,11 @@
 ///               the circle of fifths (KeySelector)
 ///   - markov/ : music-theory-weighted Markov chain over scale degrees
 ///               (TheoryWeights, TransitionMatrix, MelodyChain)
-///   - midi/   : assemble the generated notes into a MIDI sequence
+///   - midi/   : assemble the generated notes into a tick-based sequence and
+///               serialise it as a dependency-free Standard MIDI File
 ///
-/// The image, scales and markov stages are implemented; the midi stage is
-/// still a skeleton whose feature logic is not written yet.
+/// All four stages are implemented; the standalone `lumena_demo` executable
+/// drives the whole pipeline from an image to a .mid file.
 
 namespace lumena {
 

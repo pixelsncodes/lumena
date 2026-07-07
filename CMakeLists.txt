@@ -62,7 +62,8 @@ add_library(Lumena STATIC
     src/markov/TheoryWeights.cpp
     src/markov/TransitionMatrix.cpp
     src/markov/MelodyChain.cpp
-    src/midi/MidiSequence.cpp)
+    src/midi/MidiSequence.cpp
+    src/midi/MidiFileWriter.cpp)
 
 add_library(Lumena::Lumena ALIAS Lumena)
 
@@ -89,6 +90,17 @@ if(MSVC)
     target_compile_options(Lumena PRIVATE /W4)
 else()
     target_compile_options(Lumena PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+# --------------------------------------------------------------------------
+# Demo executable (standalone builds only)
+# --------------------------------------------------------------------------
+# A small command-line driver that runs the whole pipeline on an image and can
+# write the result as a Standard MIDI File. Not built when Lumena is embedded as
+# a subproject.
+if(LUMENA_STANDALONE)
+    add_executable(lumena_demo apps/lumena_demo.cpp)
+    target_link_libraries(lumena_demo PRIVATE Lumena::Lumena)
 endif()
 
 # --------------------------------------------------------------------------
