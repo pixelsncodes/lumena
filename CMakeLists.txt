@@ -63,7 +63,8 @@ add_library(Lumena STATIC
     src/markov/TransitionMatrix.cpp
     src/markov/MelodyChain.cpp
     src/midi/MidiSequence.cpp
-    src/midi/MidiFileWriter.cpp)
+    src/midi/MidiFileWriter.cpp
+    src/melody/MelodyGenerator.cpp)
 
 add_library(Lumena::Lumena ALIAS Lumena)
 

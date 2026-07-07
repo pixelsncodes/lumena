@@ -76,13 +76,18 @@ optionally writes a MIDI file:
 ```sh
 ./build/bin/lumena_demo path/to/image.png --out melody.mid
 # optional: --seed N  (reproducible melody)  --tempo BPM  (default 120)
+#           --rhythm straight|flowing  (default flowing: brightness-shaped
+#                                       eighth/quarter/half notes)
+#           --length N   (number of notes; default one per grid cell)
+#           --cells walk|random  (default walk: the melody wanders the image
+#                                 for a smooth line; random teleports per note)
 ```
 
 ```
 Loaded path/to/image.png (128x128)
 Detected key: G Major Pentatonic (hue 37°, saturation 0.74)
-Generated 192 notes at 120 BPM
-Wrote MIDI file: melody.mid (384 events)
+Generated 32 notes at 120 BPM (flowing rhythm, walk cells)
+Wrote MIDI file: melody.mid (64 events)
 ```
 
 The resulting `melody.mid` opens in any DAW or MIDI player.
