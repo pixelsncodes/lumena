@@ -6,27 +6,36 @@
 
 namespace lumena::scales {
 
-/// A musical scale: a human-readable name plus the semitone offsets
-/// (intervals) from the root note that belong to the scale.
+/// A musical scale rooted at an absolute MIDI note.
 ///
-/// Example — major scale: intervals = { 0, 2, 4, 5, 7, 9, 11 }.
+/// The scale is described by a set of ascending semitone offsets (`intervals`)
+/// from `rootNote`, conventionally starting at 0. For example A minor
+/// pentatonic is rootNote = 57 (A3) with intervals { 0, 3, 5, 7, 10 }.
 ///
-/// Skeleton only: stores the data, but degree/pitch conversion is not
-/// implemented yet.
-class Scale {
-public:
-    Scale() = default;
-    Scale(std::string name, std::vector<int> intervals);
+/// A plain aggregate: construct it with brace-init and read the public members
+/// directly. `noteAt` provides the degree -> MIDI-note mapping.
+struct Scale {
+    std::string name;            ///< Human-readable label, e.g. "A Minor Pentatonic".
+    int rootNote = 0;            ///< MIDI note of degree 0 (e.g. 57 for A3).
+    std::vector<int> intervals;  ///< Semitone offsets from the root, ascending.
 
-    const std::string& name() const noexcept { return name_; }
-    const std::vector<int>& intervals() const noexcept { return intervals_; }
-    std::size_t degreeCount() const noexcept { return intervals_.size(); }
+    /// Number of distinct scale degrees within a single octave.
+    std::size_t degreesPerOctave() const noexcept { return intervals.size(); }
 
-    // TODO: degreeToMidiNote(int degree, int rootNote), pitch quantisation.
+    /// Total number of usable degrees across `octaveSpan` octaves. An
+    /// octaveSpan below 1 is treated as 1.
+    int usableDegrees(int octaveSpan) const noexcept;
 
-private:
-    std::string name_;
-    std::vector<int> intervals_;
+    /// Maps a scale-degree index to an absolute MIDI note, wrapping across
+    /// `octaveSpan` octaves.
+    ///
+    /// Degrees advance through the interval pattern and roll up an octave every
+    /// `degreesPerOctave()` steps: for A minor pentatonic (5 degrees), degree 0
+    /// is the root, degree 5 is root + 12. Indices outside
+    /// [0, usableDegrees(octaveSpan)) wrap around that range, so the returned
+    /// note always lies within the configured span. Returns `rootNote` if the
+    /// scale has no intervals.
+    int noteAt(int degree, int octaveSpan) const noexcept;
 };
 
 } // namespace lumena::scales

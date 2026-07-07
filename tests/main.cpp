@@ -1,43 +1,25 @@
 // Lumena test runner.
 //
 // A dependency-free micro test harness (see test_util.h). It exercises the
-// skeleton types across every module so that (a) the library links, and (b) the
-// nlohmann/json dependency is wired up correctly, then runs the image module's
-// behavioural tests. More suites are added as feature code lands.
+// skeleton types across the still-stubbed modules so the library links, then
+// runs the behavioural suites for the implemented modules (image, scales).
+// More suites are added as feature code lands.
 
 #include <cstdio>
-#include <fstream>
-#include <sstream>
-#include <string>
-
-#include <nlohmann/json.hpp>
 
 #include "Lumena.h"
 #include "markov/MarkovChain.h"
 #include "midi/MidiSequence.h"
-#include "scales/Scale.h"
-#include "scales/ScaleManager.h"
 #include "test_util.h"
 
-// Defined in ImageTests.cpp.
+// Defined in their respective test translation units.
 void run_image_tests();
+void run_scale_tests();
 
 namespace {
 
 void test_version() {
     CHECK(!lumena::version().empty());
-}
-
-void test_scales() {
-    lumena::scales::Scale major("major", {0, 2, 4, 5, 7, 9, 11});
-    CHECK(major.name() == "major");
-    CHECK(major.degreeCount() == 7);
-
-    lumena::scales::ScaleManager manager;
-    CHECK(manager.empty());
-    // Loaders are stubs for now; they must fail cleanly, not crash.
-    CHECK(!manager.loadFromString("{}"));
-    CHECK(!manager.find("major").has_value());
 }
 
 void test_markov() {
@@ -56,33 +38,6 @@ void test_midi() {
     CHECK(seq.empty());
 }
 
-// Proves the nlohmann/json dependency is fetched, linked and usable, and that
-// the bundled config is valid JSON with the expected shape.
-void test_json_config() {
-    const std::string path = std::string(LUMENA_CONFIG_DIR) + "/scales.json";
-    std::ifstream file(path);
-    CHECK(file.is_open());
-    if (!file.is_open()) {
-        std::printf("  [INFO] could not open %s\n", path.c_str());
-        return;
-    }
-
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-
-    nlohmann::json config = nlohmann::json::parse(buffer.str(), nullptr, false);
-    CHECK(!config.is_discarded());
-    CHECK(config.contains("scales"));
-    CHECK(config["scales"].is_array());
-    CHECK(!config["scales"].empty());
-    if (config["scales"].is_array() && !config["scales"].empty()) {
-        const auto& first = config["scales"].front();
-        CHECK(first.contains("name"));
-        CHECK(first.contains("intervals"));
-        CHECK(first["intervals"].is_array());
-    }
-}
-
 } // namespace
 
 int main() {
@@ -90,11 +45,10 @@ int main() {
     std::printf("----------------------------------------\n");
 
     test_version();
-    test_scales();
     test_markov();
     test_midi();
-    test_json_config();
     run_image_tests();
+    run_scale_tests();
 
     const int checks = lumena::test::checkCount();
     const int failures = lumena::test::failureCount();

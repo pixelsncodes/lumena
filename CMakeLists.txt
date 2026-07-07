@@ -56,7 +56,7 @@ add_library(Lumena STATIC
     src/image/Image.cpp
     src/image/BrightnessGrid.cpp
     src/scales/Scale.cpp
-    src/scales/ScaleManager.cpp
+    src/scales/ScaleLibrary.cpp
     src/markov/MarkovChain.cpp
     src/midi/MidiSequence.cpp)
 

@@ -1,11 +1,15 @@
 {
+  "_comment": "Scales are defined by a root MIDI note plus a named interval pattern. To add a scale, add an entry to 'scales' referencing a pattern below (or define a new pattern). MIDI convention: middle C = C4 = 60, A4 = 69.",
+  "patterns": {
+    "minor_pentatonic": [0, 3, 5, 7, 10],
+    "major_pentatonic": [0, 2, 4, 7, 9]
+  },
   "scales": [
-    { "name": "major",            "intervals": [0, 2, 4, 5, 7, 9, 11] },
-    { "name": "natural_minor",    "intervals": [0, 2, 3, 5, 7, 8, 10] },
-    { "name": "harmonic_minor",   "intervals": [0, 2, 3, 5, 7, 8, 11] },
-    { "name": "dorian",           "intervals": [0, 2, 3, 5, 7, 9, 10] },
-    { "name": "pentatonic_major", "intervals": [0, 2, 4, 7, 9] },
-    { "name": "pentatonic_minor", "intervals": [0, 3, 5, 7, 10] },
-    { "name": "chromatic",        "intervals": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] }
+    { "name": "A Minor Pentatonic",  "root": 57, "pattern": "minor_pentatonic" },
+    { "name": "F# Minor Pentatonic", "root": 54, "pattern": "minor_pentatonic" },
+    { "name": "C Major Pentatonic",  "root": 60, "pattern": "major_pentatonic" },
+    { "name": "E Minor Pentatonic",  "root": 52, "pattern": "minor_pentatonic" },
+    { "name": "G Major Pentatonic",  "root": 55, "pattern": "major_pentatonic" },
+    { "name": "D Major Pentatonic",  "root": 62, "pattern": "major_pentatonic" }
   ]
 }

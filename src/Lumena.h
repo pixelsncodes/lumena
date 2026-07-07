@@ -9,11 +9,12 @@
 /// four stages, each living in its own subdirectory under src/:
 ///   - image/  : load an image (Image) and reduce it to a normalised
 ///               brightness grid (BrightnessGrid)
-///   - scales/ : manage musical scales, loaded from JSON config
+///   - scales/ : musical scales rooted at a MIDI note (Scale), loaded from
+///               JSON config (ScaleLibrary)
 ///   - markov/ : drive note-to-note transitions with a Markov chain
 ///   - midi/   : assemble the generated notes into a MIDI sequence
 ///
-/// The image stage is implemented; the scales, markov and midi stages are
+/// The image and scales stages are implemented; the markov and midi stages are
 /// still skeletons whose feature logic is not written yet.
 
 namespace lumena {
