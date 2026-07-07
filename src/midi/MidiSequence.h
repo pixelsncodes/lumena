@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <vector>
 
-namespace lumen::midi {
+namespace lumena::midi {
 
 /// A single timed MIDI note event.
 struct NoteEvent {
@@ -31,4 +31,4 @@ private:
     std::vector<NoteEvent> events_;
 };
 
-} // namespace lumen::midi
+} // namespace lumena::midi

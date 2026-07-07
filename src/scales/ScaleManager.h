@@ -7,7 +7,7 @@
 
 #include "scales/Scale.h"
 
-namespace lumen::scales {
+namespace lumena::scales {
 
 /// Owns the set of scales available to the generator and loads them from JSON
 /// config (see config/scales.json). Parsing is backed by nlohmann/json.
@@ -35,4 +35,4 @@ private:
     std::unordered_map<std::string, Scale> scales_;
 };
 
-} // namespace lumen::scales
+} // namespace lumena::scales

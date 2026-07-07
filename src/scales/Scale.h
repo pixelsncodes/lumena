@@ -1,9 +1,10 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
 #include <vector>
 
-namespace lumen::scales {
+namespace lumena::scales {
 
 /// A musical scale: a human-readable name plus the semitone offsets
 /// (intervals) from the root note that belong to the scale.
@@ -28,4 +29,4 @@ private:
     std::vector<int> intervals_;
 };
 
-} // namespace lumen::scales
+} // namespace lumena::scales

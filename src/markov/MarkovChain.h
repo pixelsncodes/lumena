@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <vector>
 
-namespace lumen::markov {
+namespace lumena::markov {
 
 /// First-order Markov chain over a discrete state space (e.g. scale degrees).
 ///
@@ -26,4 +26,4 @@ private:
     std::vector<std::vector<double>> transitions_;
 };
 
-} // namespace lumen::markov
+} // namespace lumena::markov

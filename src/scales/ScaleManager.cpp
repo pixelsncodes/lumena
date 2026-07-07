@@ -4,7 +4,7 @@
 // once implemented.
 #include <nlohmann/json.hpp>
 
-namespace lumen::scales {
+namespace lumena::scales {
 
 bool ScaleManager::loadFromFile(const std::string& /*path*/) {
     // TODO: read file, delegate to loadFromString.
@@ -32,4 +32,4 @@ std::vector<std::string> ScaleManager::names() const {
     return out;
 }
 
-} // namespace lumen::scales
+} // namespace lumena::scales

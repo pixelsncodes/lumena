@@ -1,9 +1,9 @@
 // Lumena test runner.
 //
-// A dependency-free micro test harness: it exercises the skeleton types across
-// every module so that (a) the library links, and (b) the nlohmann/json
-// dependency is wired up correctly. Real behavioural tests are added as the
-// feature code lands.
+// A dependency-free micro test harness (see test_util.h). It exercises the
+// skeleton types across every module so that (a) the library links, and (b) the
+// nlohmann/json dependency is wired up correctly, then runs the image module's
+// behavioural tests. More suites are added as feature code lands.
 
 #include <cstdio>
 #include <fstream>
@@ -13,49 +13,27 @@
 #include <nlohmann/json.hpp>
 
 #include "Lumena.h"
-#include "image/BrightnessSampler.h"
-#include "image/ImageGrid.h"
 #include "markov/MarkovChain.h"
 #include "midi/MidiSequence.h"
 #include "scales/Scale.h"
 #include "scales/ScaleManager.h"
+#include "test_util.h"
+
+// Defined in ImageTests.cpp.
+void run_image_tests();
 
 namespace {
 
-int g_checks = 0;
-int g_failures = 0;
-
-void check(bool cond, const char* expr, const char* file, int line) {
-    ++g_checks;
-    if (!cond) {
-        ++g_failures;
-        std::printf("  [FAIL] %s:%d: %s\n", file, line, expr);
-    }
-}
-
-#define CHECK(cond) check((cond), #cond, __FILE__, __LINE__)
-
 void test_version() {
-    CHECK(!lumen::version().empty());
-}
-
-void test_image() {
-    lumen::image::ImageGrid grid(16, 12);
-    CHECK(grid.columns() == 16);
-    CHECK(grid.rows() == 12);
-    CHECK(grid.cellCount() == 16 * 12);
-
-    lumen::image::BrightnessSampler sampler;
-    const auto brightness = sampler.sample(grid);
-    CHECK(brightness.size() == grid.cellCount());
+    CHECK(!lumena::version().empty());
 }
 
 void test_scales() {
-    lumen::scales::Scale major("major", {0, 2, 4, 5, 7, 9, 11});
+    lumena::scales::Scale major("major", {0, 2, 4, 5, 7, 9, 11});
     CHECK(major.name() == "major");
     CHECK(major.degreeCount() == 7);
 
-    lumen::scales::ScaleManager manager;
+    lumena::scales::ScaleManager manager;
     CHECK(manager.empty());
     // Loaders are stubs for now; they must fail cleanly, not crash.
     CHECK(!manager.loadFromString("{}"));
@@ -63,15 +41,15 @@ void test_scales() {
 }
 
 void test_markov() {
-    lumen::markov::MarkovChain chain(7);
+    lumena::markov::MarkovChain chain(7);
     CHECK(chain.stateCount() == 7);
 }
 
 void test_midi() {
-    lumen::midi::MidiSequence seq;
+    lumena::midi::MidiSequence seq;
     CHECK(seq.empty());
-    seq.add(lumen::midi::NoteEvent{60, 100, 0.0, 1.0});
-    seq.add(lumen::midi::NoteEvent{64, 90, 1.0, 0.5});
+    seq.add(lumena::midi::NoteEvent{60, 100, 0.0, 1.0});
+    seq.add(lumena::midi::NoteEvent{64, 90, 1.0, 0.5});
     CHECK(seq.size() == 2);
     CHECK(seq.events().front().noteNumber == 60);
     seq.clear();
@@ -108,19 +86,22 @@ void test_json_config() {
 } // namespace
 
 int main() {
-    std::printf("Lumena test runner (library v%s)\n", lumen::version().c_str());
+    std::printf("Lumena test runner (library v%s)\n", lumena::version().c_str());
     std::printf("----------------------------------------\n");
 
     test_version();
-    test_image();
     test_scales();
     test_markov();
     test_midi();
     test_json_config();
+    run_image_tests();
+
+    const int checks = lumena::test::checkCount();
+    const int failures = lumena::test::failureCount();
 
     std::printf("----------------------------------------\n");
-    std::printf("%d checks run, %d passed, %d failed\n",
-                g_checks, g_checks - g_failures, g_failures);
+    std::printf("%d checks run, %d passed, %d failed\n", checks,
+                checks - failures, failures);
 
-    return g_failures == 0 ? 0 : 1;
+    return failures == 0 ? 0 : 1;
 }

@@ -4,10 +4,10 @@
 #define LUMENA_VERSION "0.0.0"
 #endif
 
-namespace lumen {
+namespace lumena {
 
 std::string version() {
     return LUMENA_VERSION;
 }
 
-} // namespace lumen
+} // namespace lumena

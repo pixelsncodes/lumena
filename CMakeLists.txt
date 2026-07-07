@@ -53,8 +53,8 @@ FetchContent_MakeAvailable(nlohmann_json)
 # --------------------------------------------------------------------------
 add_library(Lumena STATIC
     src/Lumena.cpp
-    src/image/ImageGrid.cpp
-    src/image/BrightnessSampler.cpp
+    src/image/Image.cpp
+    src/image/BrightnessGrid.cpp
     src/scales/Scale.cpp
     src/scales/ScaleManager.cpp
     src/markov/MarkovChain.cpp
@@ -65,7 +65,11 @@ add_library(Lumena::Lumena ALIAS Lumena)
 target_include_directories(Lumena
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
-        $<INSTALL_INTERFACE:include>)
+        $<INSTALL_INTERFACE:include>
+    PRIVATE
+        # Vendored single-header libraries (stb_image); implementation detail,
+        # so kept off the public interface.
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 
 target_link_libraries(Lumena
     PUBLIC
