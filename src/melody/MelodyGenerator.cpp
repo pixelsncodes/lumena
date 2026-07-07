@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstddef>
 #include <limits>
+#include <set>
+#include <unordered_map>
 
 #include "markov/MelodyChain.h"
 #include "markov/TheoryWeights.h"
@@ -81,6 +83,19 @@ int brightnessToVelocity(float brightness) noexcept {
            static_cast<int>(std::lround(static_cast<double>(b) * span));
 }
 
+namespace {
+// Clamps to [0, 1].
+double clampUnit(double x) { return x < 0.0 ? 0.0 : (x > 1.0 ? 1.0 : x); }
+
+// Scales a MIDI velocity by an Energy amount in [0, 1]: 0.5 is neutral, 0 is
+// softer (down to ~0.7x), 1 is louder (up to ~1.3x). Result stays in [1, 127].
+int applyEnergy(int velocity, double energy) {
+    const double factor = 0.7 + 0.6 * clampUnit(energy);
+    const long v = std::lround(static_cast<double>(velocity) * factor);
+    return static_cast<int>(v < 1 ? 1 : (v > 127 ? 127 : v));
+}
+}  // namespace
+
 double flowingDuration(float brightness, std::mt19937& rng) {
     const double b = static_cast<double>(clamp01(brightness));
 
@@ -154,7 +169,7 @@ Melody generateFreeform(const BrightnessGrid& grid, const Scale& scale,
 
         Note note;
         note.noteNumber = scale.noteAt(static_cast<int>(degree), options.octaveSpan);
-        note.velocity = brightnessToVelocity(brightness);
+        note.velocity = applyEnergy(brightnessToVelocity(brightness), options.energy);
         note.startBeats = beat;
         note.lengthBeats = (options.rhythm == RhythmMode::Flowing)
                                ? flowingDuration(brightness, rng)
@@ -204,7 +219,21 @@ public:
           bias_(static_cast<float>(options.brightnessBias)),
           col_(grid.columns() / 2),
           row_(grid.rows() / 2),
-          degree_(static_cast<std::size_t>(totalDegrees / 2)) {}
+          degree_(static_cast<std::size_t>(totalDegrees / 2)) {
+        // Tonic triad pitch classes for strong-beat chord-tone targeting: major
+        // or minor third per the scale, plus the perfect fifth.
+        bool hasM3 = false, hasm3 = false;
+        for (int iv : scale.intervals) {
+            const int pc = ((iv % 12) + 12) % 12;
+            if (pc == 4) hasM3 = true;
+            if (pc == 3) hasm3 = true;
+        }
+        const int tonicPc = ((scale.rootNote % 12) + 12) % 12;
+        const int third = (hasM3 && ! hasm3) ? 4 : 3;
+        chordPcs_[0] = tonicPc;
+        chordPcs_[1] = (tonicPc + third) % 12;
+        chordPcs_[2] = (tonicPc + 7) % 12;
+    }
 
     // Builds a phrase of `count` notes by walking the grid. When `newRegion` is
     // set, the walk teleports to a random cell first (the contrasting-phrase B).
@@ -212,6 +241,7 @@ public:
     // nearest tonic or fifth degree.
     std::vector<PhraseNote> walkPhrase(int count, bool newRegion,
                                        bool tonicFifthEnding) {
+        localBeat_ = 0.0;  // strong-beat tracking is per-phrase
         std::vector<PhraseNote> phrase;
         phrase.reserve(static_cast<std::size_t>(count));
         for (int i = 0; i < count; ++i) {
@@ -443,9 +473,13 @@ public:
     }
 
 private:
-    // Advances one step: moves on the grid, samples the next degree (optionally
-    // biased toward a phrase-ending tonic/fifth), and packages a PhraseNote.
+    // Advances one step: moves on the grid, then chooses the next degree by
+    // stepwise Markov motion nudged by the image's brightness *gradient* (so the
+    // image shapes contour without collapsing the line to one pitch), snapping to
+    // a chord tone on strong beats. Duration comes from Energy/Complexity, not
+    // brightness, so "energetic" is actually denser and more varied.
     PhraseNote stepNote(bool jump, bool ending) {
+        const float prevBright = grid_.valueAt(col_, row_);
         if (jump || options_.cellPath == CellPath::PureRandom) {
             std::uniform_int_distribution<int> colDist(0, grid_.columns() - 1);
             std::uniform_int_distribution<int> rowDist(0, grid_.rows() - 1);
@@ -459,28 +493,108 @@ private:
         }
 
         const float brightness = grid_.valueAt(col_, row_);
+        const float gradient = brightness - prevBright;
+        const double energy = clampUnit(options_.energy);
+        const double complexity = clampUnit(options_.arpeggioAmount);
+        const bool strong = std::fabs(localBeat_ - std::round(localBeat_)) < 1e-3;
+
         if (ending) {
             const int target = nearestDegreeWithPitchClass(
                 static_cast<int>(degree_), /*wantFifth=*/true);
             degree_ = chain_.nextBiased(degree_, static_cast<float>(target),
                                         kPhraseEndBias);
         } else {
-            const int target = mapBrightnessToDegree(brightness, totalDegrees_);
-            degree_ = chain_.nextBiased(degree_, static_cast<float>(target),
-                                        bias_);
+            // Base motion: pure Markov (stepwise, with the chain's built-in
+            // anti-repeat / voice-leading rules).
+            int next = static_cast<int>(chain_.next(degree_));
+
+            // Complexity: occasional leap for interval variety.
+            if (uni01() < complexity * 0.4) {
+                const int leap = (uni01() < 0.5 ? -1 : 1) *
+                                 (2 + static_cast<int>(uni01() * 2.0));  // ±2..3
+                next = clampDegree(next + leap);
+            }
+            // Image influence: nudge one step in the brightness-gradient
+            // direction (contour), scaled by the Image Influence amount.
+            if (std::fabs(gradient) > 0.02f && uni01() < bias_) {
+                next = clampDegree(next + (gradient > 0.0f ? 1 : -1));
+            }
+            // Strong beats prefer a chord tone; weak beats may pass through.
+            if (strong && uni01() < 0.6) {
+                next = nearestChordToneDegree(next);
+            }
+            // Anti-stuck: never sit on the same degree twice running.
+            if (next == static_cast<int>(degree_)) {
+                next = clampDegree(next + (uni01() < 0.5 ? -1 : 1));
+            }
+            degree_ = static_cast<std::size_t>(next);
         }
 
         PhraseNote note;
         note.degree = static_cast<int>(degree_);
         note.noteNumber = scale_.noteAt(note.degree, options_.octaveSpan);
-        note.velocity = brightnessToVelocity(brightness);
+        int vel = brightnessToVelocity(brightness);
+        if (strong) vel = std::min(127, vel + static_cast<int>(10.0 * energy));  // accent
+        note.velocity = vel;
         note.brightness = brightness;
         note.col = col_;
         note.row = row_;
         note.lengthBeats = (options_.rhythm == RhythmMode::Flowing)
-                               ? flowingDuration(brightness, rng_)
+                               ? nextDuration()
                                : 1.0;
+        localBeat_ += note.lengthBeats;
         return note;
+    }
+
+    // A uniform [0,1) draw.
+    double uni01() {
+        std::uniform_real_distribution<double> d(0.0, 1.0);
+        return d(rng_);
+    }
+
+    // Clamps a degree index into the usable range.
+    int clampDegree(int d) const {
+        if (d < 0) return 0;
+        if (d >= totalDegrees_) return totalDegrees_ - 1;
+        return d;
+    }
+
+    // The chord tone (tonic-triad pitch class) nearest to degree `from`.
+    int nearestChordToneDegree(int from) const {
+        for (int r = 0; r < totalDegrees_; ++r) {
+            for (int s : {from - r, from + r}) {
+                if (s < 0 || s >= totalDegrees_) continue;
+                const int pc = scale_.noteAt(s, options_.octaveSpan) % 12;
+                if (pc == chordPcs_[0] || pc == chordPcs_[1] || pc == chordPcs_[2])
+                    return s;
+            }
+        }
+        return clampDegree(from);
+    }
+
+    // Next note length in beats, driven by Energy (denser/shorter) and
+    // Complexity (more variety), independent of brightness. Rhythm-first.
+    double nextDuration() {
+        const double e = clampUnit(options_.energy);
+        const double cx = clampUnit(options_.arpeggioAmount);
+        // (duration, weight) — energy shifts weight toward short values, and
+        // complexity opens up dotted/syncopated lengths for variety.
+        const double durs[5] = {2.0, 1.0, 0.5, 0.25, 1.5};
+        const double wts[5]  = {
+            0.9 * (1.0 - e),        // half — calm
+            0.6,                    // quarter — always plausible
+            0.35 + 0.9 * e,         // eighth — driven by energy
+            0.7 * e * (0.5 + cx),   // sixteenth — energy + complexity
+            0.15 + 0.7 * cx         // dotted quarter — complexity/syncopation
+        };
+        double total = 0.0;
+        for (double w : wts) total += (w > 0.0 ? w : 0.0);
+        double r = uni01() * total, acc = 0.0;
+        for (int i = 0; i < 5; ++i) {
+            acc += (wts[i] > 0.0 ? wts[i] : 0.0);
+            if (r <= acc) return durs[i];
+        }
+        return 1.0;
     }
 
     // The pitch class (semitones above the root, mod octave) of a scale degree.
@@ -518,6 +632,8 @@ private:
     int col_;
     int row_;
     std::size_t degree_;
+    double localBeat_ = 0.0;  // beats elapsed since the current phrase began
+    int chordPcs_[3] = {0, 4, 7};  // tonic-triad pitch classes (strong-beat targets)
 };
 
 // Builds a structured, phrased melody: motif (A), varied repeat (A'),
@@ -551,11 +667,17 @@ Melody generatePhrased(const BrightnessGrid& grid, const Scale& scale,
     // leaving room for the closing phrase.
     int bodyNotes = static_cast<int>(motif.size());
     int position = 1;
+    std::uniform_real_distribution<double> repeatCoin(0.0, 1.0);
     while (static_cast<int>(phrases.size()) < 3 ||
            bodyNotes < target - motifLen) {
         std::vector<PhraseNote> phrase;
         if (position % 2 == 1) {
-            phrase = builder.varyMotif(motif);  // A', A'', ...
+            // Variation slot: with probability `repetition` repeat the motif
+            // verbatim, otherwise emit a transposed A' variation. High
+            // Repetition -> the hook recurs; low Repetition -> it keeps evolving.
+            phrase = repeatCoin(rng) < options.repetition
+                         ? motif
+                         : builder.varyMotif(motif);  // A', A'', ...
         } else {
             phrase = builder.walkPhrase(motifLen, /*newRegion=*/true,
                                         /*tonicFifthEnding=*/true);  // B
@@ -585,14 +707,16 @@ Melody generatePhrased(const BrightnessGrid& grid, const Scale& scale,
         builder.applyPhraseDynamics(phrases[p], finalPhrase);
 
         if (p > 0 && builder.rollRest()) {
-            beat += builder.restLength();
+            // Higher Energy tightens the gaps between phrases (0 -> ~1.3x rests,
+            // 1 -> ~0.7x), for a more driving feel.
+            beat += builder.restLength() * (1.3 - 0.6 * clampUnit(options.energy));
         }
 
         melody.phraseStarts.push_back(melody.notes.size());
         for (const PhraseNote& pn : phrases[p]) {
             Note note;
             note.noteNumber = pn.noteNumber;
-            note.velocity = pn.velocity;
+            note.velocity = applyEnergy(pn.velocity, options.energy);
             note.startBeats = beat;
             note.lengthBeats = pn.lengthBeats;
             melody.notes.push_back(note);
@@ -603,6 +727,411 @@ Melody generatePhrased(const BrightnessGrid& grid, const Scale& scale,
     }
 
     return melody;
+}
+
+// ---- arpeggiator ------------------------------------------------------------
+
+// One full cycle of chord-tone indices in the requested pattern order. Random
+// is handled per-step by the caller, so here it just returns the ascending set.
+std::vector<int> orderChord(const std::vector<int>& asc, ArpPattern pattern) {
+    const int n = static_cast<int>(asc.size());
+    std::vector<int> seq;
+    switch (pattern) {
+        case ArpPattern::Down:
+            seq.assign(asc.rbegin(), asc.rend());
+            break;
+        case ArpPattern::UpDown:
+            seq = asc;  // ascending
+            for (int i = n - 2; i >= 1; --i) {
+                seq.push_back(asc[static_cast<std::size_t>(i)]);  // ...and back
+            }
+            break;
+        case ArpPattern::Converge: {
+            int lo = 0, hi = n - 1;
+            bool takeLo = true;
+            while (lo <= hi) {
+                seq.push_back(takeLo ? asc[static_cast<std::size_t>(lo++)]
+                                     : asc[static_cast<std::size_t>(hi--)]);
+                takeLo = !takeLo;
+            }
+            break;
+        }
+        case ArpPattern::Up:
+        case ArpPattern::Random:
+        default:
+            seq = asc;
+            break;
+    }
+    if (seq.empty()) seq.push_back(0);
+    return seq;
+}
+
+// ---- anti-boring post-processing --------------------------------------------
+
+// A safety net enforcing the "don't be static" criteria on a finished melody:
+// breaks up any pitch that dominates the line and guarantees a minimum spread of
+// scale tones when Energy/Complexity ask for activity. Only pitches move (by
+// whole scale degrees); timing is untouched, so it composes with Lock Rhythm.
+// Deterministic given `rng`.
+void enforceVariety(Melody& melody, const Scale& scale,
+                    const MelodyOptions& options, std::mt19937& rng) {
+    const std::size_t n = melody.notes.size();
+    if (n < 6 || melody.degrees.size() != n) return;
+
+    const double repetition = clampUnit(options.repetition);
+    const bool wantVariety =
+        clampUnit(options.energy) > 0.4 || clampUnit(options.arpeggioAmount) > 0.4;
+    const int span = options.octaveSpan;
+    const int usable = scale.usableDegrees(span);
+    if (usable < 4) return;  // pentatonic-in-one-octave etc.: leave it be
+
+    std::uniform_int_distribution<int> shiftPick(0, 1);
+    auto reNote = [&](std::size_t i, int newDegree) {
+        newDegree = newDegree < 0 ? 0 : (newDegree >= usable ? usable - 1 : newDegree);
+        melody.degrees[i] = newDegree;
+        melody.notes[i].noteNumber = scale.noteAt(newDegree, span);
+    };
+
+    // 1) Pitch dominance: if one pitch is used for > 60% of notes (and Repetition
+    //    isn't near max), shift alternate offending notes to a neighbour degree.
+    {
+        std::unordered_map<int, int> counts;
+        for (const Note& nt : melody.notes) counts[nt.noteNumber]++;
+        int domNote = melody.notes[0].noteNumber, domCount = 0;
+        for (const auto& kv : counts)
+            if (kv.second > domCount) { domCount = kv.second; domNote = kv.first; }
+
+        if (repetition < 0.8 &&
+            static_cast<double>(domCount) > 0.6 * static_cast<double>(n)) {
+            int seen = 0;
+            for (std::size_t i = 0; i < n; ++i) {
+                if (melody.notes[i].noteNumber != domNote) continue;
+                // Keep ~half of them; move the rest to a neighbour scale degree.
+                if ((seen++ % 2) == 1) {
+                    const int dir = shiftPick(rng) ? 1 : -1;
+                    reNote(i, melody.degrees[i] + dir * (1 + shiftPick(rng)));
+                }
+            }
+        }
+    }
+
+    // 2) Minimum spread: when activity is wanted, ensure at least 4 distinct
+    //    scale tones by nudging a few notes onto fresh degrees.
+    if (wantVariety) {
+        auto distinct = [&] {
+            std::set<int> s;
+            for (const Note& nt : melody.notes) s.insert(nt.noteNumber);
+            return s.size();
+        };
+        for (int guard = 0; distinct() < 4 && guard < 8; ++guard) {
+            const std::size_t i = static_cast<std::size_t>(rng() % n);
+            reNote(i, melody.degrees[i] + (shiftPick(rng) ? 2 : -2));
+        }
+    }
+}
+
+
+
+// Semitone offsets of the major and natural-minor scales from the tonic.
+constexpr int kMajorSteps[7] = {0, 2, 4, 5, 7, 9, 11};
+constexpr int kMinorSteps[7] = {0, 2, 3, 5, 7, 8, 10};
+
+// A scale is treated as major-flavoured when it has a major third above the
+// tonic and no minor third (Ionian/Lydian/Mixolydian/major pentatonic);
+// everything else (Aeolian/Dorian/Phrygian/blues/minor pentatonic) is minor.
+// This lets Chords/Arp build real triads in the key even when the melodic scale
+// is pentatonic or blues (where stacking raw scale degrees would give clusters).
+bool scaleIsMajor(const Scale& scale) {
+    bool hasMajor3 = false, hasMinor3 = false;
+    for (int iv : scale.intervals) {
+        const int pc = ((iv % 12) + 12) % 12;
+        if (pc == 4) hasMajor3 = true;
+        if (pc == 3) hasMinor3 = true;
+    }
+    return hasMajor3 && ! hasMinor3;
+}
+
+// MIDI notes of a diatonic chord: `size` tones stacked in thirds on diatonic
+// degree `deg` of the key (0..6), voiced upward from `baseMidi + tonicPc`.
+// Because the tones come from the 7-note major/minor scale, this is always a
+// real triad (or seventh), regardless of the melodic scale the image chose.
+std::vector<int> diatonicChord(int tonicPc, bool major, int deg, int size,
+                               int baseMidi) {
+    const int* steps = major ? kMajorSteps : kMinorSteps;
+    std::vector<int> notes;
+    notes.reserve(static_cast<std::size_t>(std::max(1, size)));
+    for (int k = 0; k < size; ++k) {
+        const int d = deg + 2 * k;             // stacked scale-thirds
+        const int idx = ((d % 7) + 7) % 7;
+        const int oct = (d - idx) / 7;
+        int n = baseMidi + tonicPc + steps[idx] + 12 * oct;
+        notes.push_back(n < 0 ? 0 : (n > 127 ? 127 : n));
+    }
+    return notes;
+}
+
+// A short diatonic chord progression as degrees (0..6): mostly falling thirds
+// and rising steps, resolving home to the tonic every fourth chord so a loop
+// wraps cleanly. Shared by the arpeggiator and the block-chord generator.
+std::vector<int> chordRootWalk(int count, std::mt19937& rng) {
+    const int motions[] = {-2, 1, -3, 3, -1};
+    const double w[] = {0.32, 0.26, 0.18, 0.12, 0.12};
+    std::discrete_distribution<int> md(std::begin(w), std::end(w));
+    const int n = std::max(1, count);
+    std::vector<int> roots;
+    roots.reserve(static_cast<std::size_t>(n));
+    int root = 0;
+    for (int c = 0; c < n; ++c) {
+        if (c > 0) root = (c % 4 == 0) ? 0 : root + motions[md(rng)];
+        roots.push_back(((root % 7) + 7) % 7);
+    }
+    return roots;
+}
+
+// Register the chords/arp are voiced from. MUST be a multiple of 12 so that
+// note%12 == (tonicPc + scaleStep)%12 and the harmony stays in the detected key.
+constexpr int kHarmonyBaseMidi = 48;  // C3 — clear of the low-end mud
+
+// An arpeggio that moves through a chord progression: each bar takes the next
+// chord from a diatonic walk and spells it as a broken chord in `arpPattern`
+// across `arpOctaves`. The grid is still walked so each note's velocity tracks
+// image brightness and the Lens overlay lights up. This is a real arpeggio over
+// changing harmony, not a static tonic triad run up and down.
+Melody generateArpeggiated(const BrightnessGrid& grid, const Scale& scale,
+                           const MelodyOptions& options, std::mt19937& rng) {
+    Melody melody;
+
+    const int degreesPerOctave = static_cast<int>(scale.degreesPerOctave());
+    if (degreesPerOctave == 0) return melody;
+
+    const int arpOctaves = std::max(1, options.arpOctaves);
+    const int tonicPc = ((scale.rootNote % 12) + 12) % 12;
+    const bool major = scaleIsMajor(scale);
+    const bool randomPattern = options.arpPattern == ArpPattern::Random;
+
+    const double rate = options.arpRate > 0.0 ? options.arpRate : 0.5;
+    const double bpb = options.beatsPerBar > 0.0 ? options.beatsPerBar : 4.0;
+    const int notesPerBar = std::max(1, static_cast<int>(std::lround(bpb / rate)));
+
+    int length =
+        options.length > 0 ? options.length : static_cast<int>(grid.cellCount());
+    int bars;
+    if (options.loopBars > 0) {
+        bars = options.loopBars;
+        length = bars * notesPerBar;  // fill exactly, for a seamless loop
+    } else {
+        bars = std::max(1, (length + notesPerBar - 1) / notesPerBar);
+    }
+
+    // One chord per bar.
+    const std::vector<int> roots = chordRootWalk(bars, rng);
+
+    const int cols = grid.columns();
+    const int rows = grid.rows();
+    int col = cols / 2;
+    int row = rows / 2;
+    std::uniform_int_distribution<int> colDist(0, cols - 1);
+    std::uniform_int_distribution<int> rowDist(0, rows - 1);
+    std::uniform_int_distribution<int> stepDist(0, 7);
+
+    melody.notes.reserve(static_cast<std::size_t>(length));
+    melody.degrees.reserve(static_cast<std::size_t>(length));
+    melody.cells.reserve(static_cast<std::size_t>(length));
+
+    int currentBar = -1;
+    std::vector<int> cycle;  // this bar's chord tones, ordered by pattern
+    double beat = 0.0;
+    for (int i = 0; i < length; ++i) {
+        if (options.cellPath == CellPath::PureRandom) {
+            col = colDist(rng);
+            row = rowDist(rng);
+        } else if (i > 0) {
+            const int k = stepDist(rng);
+            col = wrap(col + kDx[k], cols);
+            row = wrap(row + kDy[k], rows);
+        }
+        const float brightness = grid.valueAt(col, row);
+
+        const int bar = std::min(i / notesPerBar, bars - 1);
+        if (bar != currentBar) {
+            currentBar = bar;
+            std::vector<int> asc;
+            asc.reserve(static_cast<std::size_t>(3 * arpOctaves));
+            for (int o = 0; o < arpOctaves; ++o)
+                for (int n : diatonicChord(tonicPc, major, roots[bar], 3,
+                                           kHarmonyBaseMidi + 12 * o))
+                    asc.push_back(n);
+            cycle = orderChord(asc, options.arpPattern);
+        }
+
+        const int within = i % notesPerBar;
+        int arpNote;
+        if (randomPattern) {
+            std::uniform_int_distribution<std::size_t> pick(0, cycle.size() - 1);
+            arpNote = cycle[pick(rng)];
+        } else {
+            arpNote = cycle[static_cast<std::size_t>(within) % cycle.size()];
+        }
+        // Image-driven octave jump on very bright cells: contour from the image,
+        // not a flat ladder.
+        if (brightness > 0.82f && arpNote + 12 <= 127) arpNote += 12;
+
+        // Accents: bar downbeat hardest, on-beats accented, off-beats softer,
+        // brighter cells hit harder — never flat velocity.
+        const bool onBeat = (within % 2 == 0);
+        const bool downBeat = (within == 0);
+        int vel = brightnessToVelocity(brightness)
+                  + (downBeat ? 22 : (onBeat ? 12 : -6))
+                  + static_cast<int>(brightness * 10.0f);
+        vel = applyEnergy(vel, options.energy);
+        vel = vel < 1 ? 1 : (vel > 127 ? 127 : vel);
+
+        // Swing (delay + shorten off-beats, lengthen on-beats so each pair still
+        // spans 2*rate) and a gate so notes articulate rather than run together.
+        const double swing = 0.2;
+        const double gate = 0.9;
+        double start = beat;
+        double len = rate;
+        if (! randomPattern) {
+            if (onBeat) len = rate * (1.0 + swing);
+            else { start = beat + rate * swing; len = rate * (1.0 - swing); }
+        }
+
+        Note note;
+        note.noteNumber = arpNote;
+        note.velocity = vel;
+        note.startBeats = start;
+        note.lengthBeats = len * gate;
+
+        melody.notes.push_back(note);
+        melody.degrees.push_back(0);
+        melody.cells.push_back(GridCell{col, row});
+        beat += rate;
+    }
+    return melody;
+}
+
+// ---- chords -----------------------------------------------------------------
+
+// A chord progression: a diatonic root walk resolving with a V–I cadence, each
+// chord voiced by inversion for smooth voice-leading (the top voice moves as
+// little as possible), one chord per bar — two per bar when Energy is high.
+// Brightness and Energy set velocity and accent the downbeat of each bar.
+Melody generateChords(const BrightnessGrid& grid, const Scale& scale,
+                      const MelodyOptions& options, std::mt19937& rng) {
+    Melody melody;
+
+    const int size = std::max(2, options.chordSize);
+    const int tonicPc = ((scale.rootNote % 12) + 12) % 12;
+    const bool major = scaleIsMajor(scale);
+    const double energy = clampUnit(options.energy);
+    const double bpb = options.beatsPerBar > 0.0 ? options.beatsPerBar : 4.0;
+
+    // Harmonic rhythm: one chord per bar, two per bar when energetic.
+    const int chordsPerBar = energy > 0.55 ? 2 : 1;
+    const double rate = bpb / chordsPerBar;
+
+    int chords =
+        options.length > 0 ? options.length : static_cast<int>(grid.cellCount());
+    if (options.loopBars > 0) chords = options.loopBars * chordsPerBar;
+    if (chords < 1) chords = 1;
+
+    const int cols = grid.columns();
+    const int rows = grid.rows();
+    int col = cols / 2;
+    int row = rows / 2;
+    std::uniform_int_distribution<int> stepDist(0, 7);
+
+    // Progression, then impose a V–I cadence at the end so the loop resolves.
+    std::vector<int> roots = chordRootWalk(chords, rng);
+    if (! roots.empty()) roots.back() = 0;                 // I (home)
+    if (roots.size() >= 2) roots[roots.size() - 2] = 4;    // V before I
+
+    // Smooth voice-leading: choose the inversion whose top note is closest to the
+    // previous chord's top note.
+    auto voiceLead = [] (std::vector<int> notes, int prevTop) {
+        if (prevTop < 0 || notes.size() < 2) return notes;
+        std::vector<int> best = notes, cur = notes;
+        int bestDist = std::numeric_limits<int>::max();
+        for (std::size_t inv = 0; inv < notes.size(); ++inv) {
+            const int top = *std::max_element(cur.begin(), cur.end());
+            const int dist = std::abs(top - prevTop);
+            if (dist < bestDist) { bestDist = dist; best = cur; }
+            *std::min_element(cur.begin(), cur.end()) += 12;  // next inversion
+        }
+        std::sort(best.begin(), best.end());
+        return best;
+    };
+
+    int prevTop = -1;
+    double beat = 0.0;
+    for (int c = 0; c < chords; ++c) {
+        if (options.cellPath == CellPath::PureRandom) {
+            std::uniform_int_distribution<int> cd(0, cols - 1), rd(0, rows - 1);
+            col = cd(rng);
+            row = rd(rng);
+        } else if (c > 0) {
+            const int k = stepDist(rng);
+            col = wrap(col + kDx[k], cols);
+            row = wrap(row + kDy[k], rows);
+        }
+        const float brightness = grid.valueAt(col, row);
+
+        // Presence + a downbeat accent (first chord of each bar).
+        const bool downBeat = (c % chordsPerBar == 0);
+        int velocity = static_cast<int>(std::lround(72.0 + 30.0 * clampUnit(brightness)))
+                       + (downBeat ? 8 : 0);
+        velocity = applyEnergy(velocity, options.energy);
+
+        std::vector<int> notes =
+            voiceLead(diatonicChord(tonicPc, major, roots[c], size, kHarmonyBaseMidi),
+                      prevTop);
+        prevTop = *std::max_element(notes.begin(), notes.end());
+
+        for (std::size_t v = 0; v < notes.size(); ++v) {
+            Note note;
+            note.noteNumber = notes[v] < 0 ? 0 : (notes[v] > 127 ? 127 : notes[v]);
+            note.velocity = (v + 1 == notes.size())
+                                ? std::min(127, velocity + 6)  // top voice sings
+                                : velocity;
+            note.startBeats = beat;
+            note.lengthBeats = rate;
+            melody.notes.push_back(note);
+            melody.degrees.push_back(roots[c] + 2 * static_cast<int>(v));
+            melody.cells.push_back(GridCell{col, row});
+        }
+        beat += rate;
+    }
+    return melody;
+}
+
+// ---- loop post-processing ---------------------------------------------------
+
+// Snaps the material's total length up to a whole number of bars by extending
+// the note(s) that end last, so a looping player repeats it seamlessly. When
+// `loopBars` > 0 it targets at least that many bars; otherwise it rounds up to
+// the next whole bar. A no-op when the material already fills whole bars (as
+// the arpeggiator/chords loop paths arrange).
+void padToWholeBars(Melody& melody, double beatsPerBar, int loopBars) {
+    if (melody.notes.empty() || beatsPerBar <= 0.0) return;
+
+    double total = 0.0;
+    for (const Note& n : melody.notes) {
+        total = std::max(total, n.startBeats + n.lengthBeats);
+    }
+
+    const double ceilBars = std::ceil(total / beatsPerBar - 1e-9);
+    const double bars = std::max({1.0, ceilBars, static_cast<double>(loopBars)});
+    const double target = bars * beatsPerBar;
+    if (target > total + 1e-9) {
+        // Extend every note that currently ends at the max (chords end together)
+        // so a final block chord stays intact.
+        for (Note& n : melody.notes) {
+            if (n.startBeats + n.lengthBeats > total - 1e-9) {
+                n.lengthBeats += (target - total);
+            }
+        }
+    }
 }
 
 }  // namespace
@@ -621,14 +1150,147 @@ Melody generateMelody(const BrightnessGrid& grid, const Scale& scale,
         return melody;
     }
 
+    // Arpeggio and Chords modes supersede the phrase/freeform Markov walk.
+    if (options.mode == GenerationMode::Arpeggio) {
+        Melody arp = generateArpeggiated(grid, scale, options, rng);
+        if (options.loopBars > 0)
+            padToWholeBars(arp, options.beatsPerBar, options.loopBars);
+        return arp;
+    }
+    if (options.mode == GenerationMode::Chords) {
+        Melody chords = generateChords(grid, scale, options, rng);
+        if (options.loopBars > 0)
+            padToWholeBars(chords, options.beatsPerBar, options.loopBars);
+        return chords;
+    }
+
     const TransitionMatrix matrix = TransitionMatrix::fromTheory(
         static_cast<std::size_t>(totalDegrees), degreesPerOctave, weights);
     MelodyChain chain(matrix, rng, weights);
 
     if (options.phraseMode == PhraseMode::Freeform) {
-        return generateFreeform(grid, scale, options, chain, totalDegrees, rng);
+        melody = generateFreeform(grid, scale, options, chain, totalDegrees, rng);
+    } else {
+        melody = generatePhrased(grid, scale, options, chain, totalDegrees, rng);
     }
-    return generatePhrased(grid, scale, options, chain, totalDegrees, rng);
+
+    // Enforce the anti-boring guarantees (no dominant pitch, enough spread).
+    enforceVariety(melody, scale, options, rng);
+
+    if (options.loopBars > 0) {
+        padToWholeBars(melody, options.beatsPerBar, options.loopBars);
+    }
+    return melody;
+}
+
+// ---- lock-aware recombination + mutation ------------------------------------
+
+namespace {
+// The nearest in-scale note above/below a MIDI note for a given scale, so a
+// mutated pitch stays diatonic. Searches the scale's own note set across a few
+// octaves around the source.
+int nearestScaleNote(const Scale& scale, int midi, int span) {
+    const int usable = scale.usableDegrees(span);
+    int best = midi;
+    int bestDist = std::numeric_limits<int>::max();
+    for (int d = 0; d < usable; ++d) {
+        const int n = scale.noteAt(d, span);
+        const int dist = std::abs(n - midi);
+        if (dist < bestDist) {
+            bestDist = dist;
+            best = n;
+        }
+    }
+    return best;
+}
+}  // namespace
+
+Melody recombineLocked(const Melody& previous, const Melody& candidate,
+                       const scales::Scale& scale, RegenLocks locks,
+                       const MelodyOptions& options) {
+    // Fast paths: nothing locked -> the fresh candidate; both locked -> the
+    // previous melody unchanged.
+    if (!locks.rhythm && !locks.pitch) return candidate;
+    if (locks.rhythm && locks.pitch) return previous;
+    if (previous.notes.empty()) return candidate;
+    if (candidate.notes.empty()) return previous;
+
+    // The timing track (start/length) comes from the rhythm source; the pitch
+    // track (note/degree/velocity/cell) from the pitch source.
+    const Melody& rhythmSrc = locks.rhythm ? previous : candidate;
+    const Melody& pitchSrc = locks.pitch ? previous : candidate;
+    const int span = std::max(options.octaveSpan, 2);
+
+    Melody out;
+    const std::size_t n = rhythmSrc.notes.size();
+    out.notes.reserve(n);
+    out.degrees.reserve(n);
+    out.cells.reserve(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        const std::size_t pi = i % pitchSrc.notes.size();  // cycle pitches to fill
+        Note note;
+        note.startBeats = rhythmSrc.notes[i].startBeats;
+        note.lengthBeats = rhythmSrc.notes[i].lengthBeats;
+        note.noteNumber = pitchSrc.notes[pi].noteNumber;
+        note.velocity = pitchSrc.notes[pi].velocity;
+        out.notes.push_back(note);
+        out.degrees.push_back(pi < pitchSrc.degrees.size()
+                                  ? pitchSrc.degrees[pi]
+                                  : 0);
+        out.cells.push_back(pi < pitchSrc.cells.size() ? pitchSrc.cells[pi]
+                                                       : GridCell{});
+    }
+    (void)scale;
+    (void)span;
+    // Phrase boundaries follow the rhythm track (that's what defines timing).
+    out.phraseStarts = rhythmSrc.phraseStarts;
+    return out;
+}
+
+Melody mutate(const Melody& base, const scales::Scale& scale, RegenLocks locks,
+              double amount, const MelodyOptions& options, std::mt19937& rng) {
+    Melody out = base;
+    if (out.notes.empty()) return out;
+    if (locks.rhythm && locks.pitch) return out;  // nothing free to change
+
+    const double amt = clampUnit(amount);
+    const int span = std::max(options.octaveSpan, 2);
+    std::uniform_real_distribution<double> coin(0.0, 1.0);
+    std::uniform_int_distribution<int> stepPick(0, 3);  // +/-1 or +/-2 scale steps
+    const double durations[3] = {0.5, 1.0, 2.0};
+    std::uniform_int_distribution<int> durPick(0, 2);
+
+    for (std::size_t i = 0; i < out.notes.size(); ++i) {
+        if (coin(rng) >= amt) continue;  // leave this note alone
+
+        // Pitch: nudge to a neighbouring scale degree (kept diatonic), unless
+        // pitch is locked.
+        if (!locks.pitch) {
+            const int deltaSteps = (stepPick(rng) < 2 ? 1 : 2) *
+                                   (coin(rng) < 0.5 ? -1 : 1);
+            // Approximate a scale-step move in semitones, then snap to scale.
+            const int approx = out.notes[i].noteNumber + deltaSteps * 2;
+            out.notes[i].noteNumber = nearestScaleNote(scale, approx, span);
+        }
+
+        // Rhythm: retime this note to a neighbouring length, unless locked. The
+        // timeline is then re-laid so notes stay contiguous.
+        if (!locks.rhythm) {
+            out.notes[i].lengthBeats = durations[durPick(rng)];
+        }
+    }
+
+    // Re-lay start times if rhythm was allowed to change (keeps notes gapless).
+    if (!locks.rhythm) {
+        double beat = out.notes.front().startBeats;
+        for (Note& n : out.notes) {
+            n.startBeats = beat;
+            beat += n.lengthBeats;
+        }
+        if (options.loopBars > 0)
+            padToWholeBars(out, options.beatsPerBar, options.loopBars);
+    }
+    return out;
 }
 
 }  // namespace lumena::melody

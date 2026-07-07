@@ -54,6 +54,7 @@ ColorSummary averageHueSaturation(const Image& image) noexcept {
     double sumSin = 0.0;
     double sumCos = 0.0;
     double sumSaturation = 0.0;
+    double sumLuma = 0.0;
 
     const int width = image.width();
     const int height = image.height();
@@ -67,6 +68,11 @@ ColorSummary averageHueSaturation(const Image& image) noexcept {
             sumSin += hsv.s * std::sin(radians);
             sumCos += hsv.s * std::cos(radians);
             sumSaturation += hsv.s;
+
+            // Perceptual brightness (Rec.601 luma) on [0, 1]. Used as the
+            // "valence" axis for scale-mode selection: dark images lean toward
+            // darker modes, bright ones toward brighter modes.
+            sumLuma += (0.299 * px.r + 0.587 * px.g + 0.114 * px.b) / 255.0;
         }
     }
 
@@ -79,6 +85,7 @@ ColorSummary averageHueSaturation(const Image& image) noexcept {
     }
     summary.hue = hue;
     summary.saturation = sumSaturation / count;
+    summary.value = sumLuma / count;
     return summary;
 }
 

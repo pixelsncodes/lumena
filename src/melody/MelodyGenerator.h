@@ -37,6 +37,26 @@ enum class PhraseMode {
     Freeform,
 };
 
+/// Which kind of material a generation pass produces. Melody is the default
+/// theory-weighted single line; Chords emits a block-chord progression (stacked
+/// scale-thirds sounded together); Arpeggio spells chords out one note at a time
+/// in an `ArpPattern`.
+enum class GenerationMode {
+    Melody,
+    Chords,
+    Arpeggio,
+};
+
+/// The order an arpeggiator cycles through its chord tones (only consulted when
+/// MelodyOptions::mode is GenerationMode::Arpeggio).
+enum class ArpPattern {
+    Up,        ///< Low to high, then wrap back to the lowest.
+    Down,      ///< High to low, then wrap back to the highest.
+    UpDown,    ///< Up then back down without repeating the turning points.
+    Converge,  ///< Outside-in: lowest, highest, next-lowest, next-highest, ...
+    Random,    ///< A fresh random chord tone each step (seeded, reproducible).
+};
+
 /// How the generator walks the brightness grid to pick a brightness target for
 /// each note.
 enum class CellPath {
@@ -73,18 +93,61 @@ struct MelodyOptions {
 
     /// Pull toward the brightness-suggested scale degree, in [0, 1]. Lower
     /// values let the Markov chain's stepwise preference dominate (smoother
-    /// melodies); higher values track image brightness more literally.
+    /// melodies); higher values track image brightness more literally. The
+    /// plugin surfaces this as "Image Influence".
     double brightnessBias = 0.25;
 
     /// Probability, per phrase, of replacing one note with a quick arpeggiated
-    /// figure (root/third/fifth of the pentatonic). In [0, 1]; 0 disables
-    /// ornaments. Only consulted in Phrased mode. Bright cells (> 0.7) are
-    /// preferred as the note to ornament.
+    /// figure (root/third/fifth of the scale). In [0, 1]; 0 disables ornaments.
+    /// Only consulted in Phrased Melody mode. The plugin surfaces this as
+    /// "Complexity". Bright cells (> 0.7) are preferred as the note to ornament.
     double arpeggioAmount = 0.15;
+
+    /// Overall intensity, in [0, 1]. Higher values push velocities louder and
+    /// thin out the rests between phrases, for a more driving feel; lower values
+    /// are softer and more spacious. Surfaced in the plugin as "Energy".
+    double energy = 0.5;
+
+    /// How strongly Phrased mode repeats its motif versus varying it, in [0, 1].
+    /// 1 repeats the opening motif almost verbatim each phrase; 0 always varies
+    /// (the original, more musical behaviour). Kept low by default so melodies
+    /// stay varied — Repetition is an opt-in "make the hook recur" control.
+    /// Surfaced in the plugin as "Repetition".
+    double repetition = 0.2;
+
+    /// What kind of material to generate.
+    GenerationMode mode = GenerationMode::Melody;
+
+    /// The cycling order for the arpeggiator (Arpeggio mode).
+    ArpPattern arpPattern = ArpPattern::UpDown;
+
+    /// How many octaves the arpeggio chord spans (Arpeggio mode; >= 1).
+    int arpOctaves = 2;
+
+    /// Arpeggiator step length in beats (0.25 = sixteenths, 0.5 = eighths).
+    double arpRate = 0.5;
+
+    /// Notes per chord in Chords mode: 3 = triad, 4 = seventh (stacked
+    /// scale-thirds from the chord root).
+    int chordSize = 3;
+
+    /// Length of each chord in beats, in Chords mode (2.0 = half notes).
+    double chordRate = 2.0;
+
+    /// Loop length in whole bars: 0 = one-shot (no loop), otherwise 1/2/4/8.
+    /// When > 0 the finished material is made a seamless loop of exactly this
+    /// many `beatsPerBar` bars, so a looping player repeats it with no gap. In
+    /// Arpeggio/Chords mode the note/chord count is aligned to fill the bars; in
+    /// Melody mode the final note is extended to the bar line (Phrased already
+    /// cadences on the tonic, so the wrap resolves musically).
+    int loopBars = 0;
+
+    /// Beats per bar used for loop alignment (4.0 = common time).
+    double beatsPerBar = 4.0;
 };
 
 /// The lowest and highest MIDI velocity brightness maps onto.
-inline constexpr int kMinVelocity = 40;
+inline constexpr int kMinVelocity = 50;
 inline constexpr int kMaxVelocity = 115;
 
 /// Maps a normalised brightness in [0, 1] to a MIDI velocity in
@@ -143,5 +206,32 @@ struct Melody {
 Melody generateMelody(const image::BrightnessGrid& grid,
                       const scales::Scale& scale, const MelodyOptions& options,
                       std::mt19937& rng);
+
+/// Which dimensions of an existing melody a re-generation should preserve.
+/// These back the plugin's "Lock Rhythm" / "Lock Pitch" toggles: a locked
+/// dimension is carried over verbatim from the previous melody while the
+/// unlocked dimension(s) are regenerated. Locking both keeps the melody
+/// unchanged; locking neither is a full fresh generation.
+struct RegenLocks {
+    bool rhythm = false;  ///< Keep each note's start/length (the timing track).
+    bool pitch = false;   ///< Keep each note's pitch/degree (the melodic track).
+};
+
+/// Combines a `previous` melody with a freshly generated `candidate`, taking the
+/// timing track from whichever the locks say and the pitch track from the other.
+/// The result follows the timing source's note count; if the pitch source is
+/// shorter its degrees are cycled to fill. Velocities and source cells follow
+/// the pitch track (they belong to the melodic contour). With neither lock set
+/// the candidate is returned unchanged; with both, the previous is returned.
+Melody recombineLocked(const Melody& previous, const Melody& candidate,
+                       const scales::Scale& scale, RegenLocks locks,
+                       const MelodyOptions& options);
+
+/// Produces a small variation of `base`: alters roughly `amount` (in [0, 1]) of
+/// the notes, nudging unlocked pitches to a neighbouring scale degree and/or
+/// jittering unlocked note lengths, leaving locked dimensions untouched. Used
+/// for the plugin's "Mutate" action. `rng` is borrowed, never seeded.
+Melody mutate(const Melody& base, const scales::Scale& scale, RegenLocks locks,
+              double amount, const MelodyOptions& options, std::mt19937& rng);
 
 }  // namespace lumena::melody

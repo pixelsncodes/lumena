@@ -30,7 +30,9 @@ namespace {
 
 using lumena::image::BrightnessGrid;
 using lumena::image::Image;
+using lumena::melody::ArpPattern;
 using lumena::melody::CellPath;
+using lumena::melody::GenerationMode;
 using lumena::melody::Melody;
 using lumena::melody::MelodyOptions;
 using lumena::melody::PhraseMode;
@@ -54,7 +56,12 @@ void printUsage(const char* argv0) {
                  "Usage: %s <image> [--out melody.mid] [--seed N] [--tempo BPM]\n"
                  "          [--rhythm straight|flowing] [--length N] "
                  "[--cells walk|random]\n"
-                 "          [--mode phrased|freeform] [--arp 0..1]\n",
+                 "          [--mode phrased|freeform]\n"
+                 "          [--arpeggiate | --chords [--chord-size N]]\n"
+                 "          [--arp-pattern up|down|updown|converge|random]\n"
+                 "          [--loop-bars 0|1|2|4|8]\n"
+                 "          [--energy 0..1] [--complexity 0..1]\n"
+                 "          [--image-influence 0..1] [--repetition 0..1]\n",
                  argv0);
 }
 
@@ -101,6 +108,43 @@ bool parseArgs(int argc, char** argv, Options& opts) {
             }
         } else if (arg == "--arp" && i + 1 < argc) {
             opts.melody.arpeggioAmount = std::strtod(argv[++i], nullptr);
+        } else if (arg == "--arpeggiate") {
+            opts.melody.mode = GenerationMode::Arpeggio;
+        } else if (arg == "--chords") {
+            opts.melody.mode = GenerationMode::Chords;
+        } else if (arg == "--chord-size" && i + 1 < argc) {
+            opts.melody.chordSize =
+                static_cast<int>(std::strtol(argv[++i], nullptr, 10));
+        } else if (arg == "--energy" && i + 1 < argc) {
+            opts.melody.energy = std::strtod(argv[++i], nullptr);
+        } else if (arg == "--complexity" && i + 1 < argc) {
+            opts.melody.arpeggioAmount = std::strtod(argv[++i], nullptr);
+        } else if (arg == "--image-influence" && i + 1 < argc) {
+            opts.melody.brightnessBias = std::strtod(argv[++i], nullptr);
+        } else if (arg == "--repetition" && i + 1 < argc) {
+            opts.melody.repetition = std::strtod(argv[++i], nullptr);
+        } else if (arg == "--arp-octaves" && i + 1 < argc) {
+            opts.melody.arpOctaves =
+                static_cast<int>(std::strtol(argv[++i], nullptr, 10));
+        } else if (arg == "--arp-pattern" && i + 1 < argc) {
+            const std::string p = argv[++i];
+            if (p == "up") {
+                opts.melody.arpPattern = ArpPattern::Up;
+            } else if (p == "down") {
+                opts.melody.arpPattern = ArpPattern::Down;
+            } else if (p == "updown") {
+                opts.melody.arpPattern = ArpPattern::UpDown;
+            } else if (p == "converge") {
+                opts.melody.arpPattern = ArpPattern::Converge;
+            } else if (p == "random") {
+                opts.melody.arpPattern = ArpPattern::Random;
+            } else {
+                std::fprintf(stderr, "Unknown --arp-pattern: %s\n", p.c_str());
+                return false;
+            }
+        } else if (arg == "--loop-bars" && i + 1 < argc) {
+            opts.melody.loopBars =
+                static_cast<int>(std::strtol(argv[++i], nullptr, 10));
         } else if (arg == "-h" || arg == "--help") {
             return false;
         } else if (!arg.empty() && arg[0] == '-') {
@@ -145,10 +189,16 @@ int main(int argc, char** argv) {
     const Melody melody =
         lumena::melody::generateMelody(grid, detection.scale, opts.melody, rng);
     const std::vector<Note>& notes = melody.notes;
-    std::printf("Generated %zu notes at %.0f BPM (%s mode, %s rhythm, %s cells)\n",
-                notes.size(), opts.tempo,
-                opts.melody.phraseMode == PhraseMode::Phrased ? "phrased"
-                                                              : "freeform",
+    const char* structure =
+        opts.melody.mode == GenerationMode::Arpeggio
+            ? "arpeggiated"
+            : opts.melody.mode == GenerationMode::Chords
+                  ? "chords"
+                  : (opts.melody.phraseMode == PhraseMode::Phrased ? "phrased"
+                                                                   : "freeform");
+    std::printf("Generated %zu notes at %.0f BPM (%s%s, %s rhythm, %s cells)\n",
+                notes.size(), opts.tempo, structure,
+                opts.melody.loopBars > 0 ? ", looped" : "",
                 opts.melody.rhythm == RhythmMode::Flowing ? "flowing" : "straight",
                 opts.melody.cellPath == CellPath::RandomWalk ? "walk" : "random");
 

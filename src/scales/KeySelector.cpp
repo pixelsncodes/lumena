@@ -13,12 +13,16 @@ namespace lumena::scales {
 namespace {
 
 constexpr int kCircleSize = 12;
-constexpr int kBaseRoot = 60;            // C4; major roots span [60, 71].
-constexpr int kRelativeMinorOffset = 3;  // relative minor tonic is 3 semitones down.
-constexpr int kRelativeMinorSteps = 3;   // ...and 3 circle-of-fifths positions round.
+constexpr int kBaseRoot = 60;            // C4; tonic roots span [60, 71].
 constexpr double kDegreesPerPosition = 30.0;
 constexpr double kGrayscaleFloor = 0.05;  // below this, hue is unreliable.
-constexpr double kMajorThreshold = 0.5;
+
+// Scale-type selection thresholds (see chooseScaleType).
+constexpr double kWashedOutSaturation = 0.22;  // below -> pentatonic
+constexpr double kVividSaturation = 0.70;       // above -> blues/harmonic minor
+constexpr double kBrightPentatonic = 0.5;       // washed-out major vs minor pent
+constexpr double kHarmonicMinorLuma = 0.18;     // vivid + very dark
+constexpr double kBluesLuma = 0.42;             // vivid + dark
 
 // Circle of fifths, clockwise from C. Index i also gives the pitch class
 // (i * 7) % 12 above C.
@@ -28,55 +32,75 @@ const std::array<const char*, kCircleSize>& circleNames() {
     return names;
 }
 
-const std::vector<int>& majorPentatonic() {
-    static const std::vector<int> pattern = {0, 2, 4, 7, 9};
-    return pattern;
-}
-
-const std::vector<int>& minorPentatonic() {
-    static const std::vector<int> pattern = {0, 3, 5, 7, 10};
-    return pattern;
-}
-
 int pitchClass(int position) {
     return (position * 7) % 12;
 }
 
-KeyDetection buildDetection(double hue, double saturation, int position,
-                            bool major) {
+// Major-flavoured families, for the informational KeyDetection::major flag.
+bool isMajorFamily(ScaleType type) {
+    switch (type) {
+        case ScaleType::MajorPentatonic:
+        case ScaleType::Ionian:
+        case ScaleType::Lydian:
+        case ScaleType::Mixolydian:
+            return true;
+        default:
+            return false;
+    }
+}
+
+KeyDetection buildDetection(double hue, double saturation, double value,
+                            int position, ScaleType type) {
     KeyDetection det;
     det.hue = hue;
     det.saturation = saturation;
+    det.value = value;
     det.position = position;
-    det.major = major;
+    det.type = type;
+    det.major = isMajorFamily(type);
 
-    const int majorRoot = kBaseRoot + pitchClass(position);
-    if (major) {
-        det.scale.name =
-            std::string(circleNames()[position]) + " Major Pentatonic";
-        det.scale.rootNote = majorRoot;
-        det.scale.intervals = majorPentatonic();
-    } else {
-        const int minorIndex = (position + kRelativeMinorSteps) % kCircleSize;
-        det.scale.name =
-            std::string(circleNames()[minorIndex]) + " Minor Pentatonic";
-        det.scale.rootNote = majorRoot - kRelativeMinorOffset;
-        det.scale.intervals = minorPentatonic();
-    }
+    det.scale.name =
+        std::string(circleNames()[position]) + " " + typeName(type);
+    det.scale.rootNote = kBaseRoot + pitchClass(position);
+    det.scale.intervals = intervalsFor(type);
     det.keyName = det.scale.name;
     return det;
 }
 
 }  // namespace
 
+ScaleType chooseScaleType(double saturation, double value) noexcept {
+    // Washed-out images have little colour to interpret: keep it simple with a
+    // pentatonic, bright -> major, dark -> minor.
+    if (saturation < kWashedOutSaturation) {
+        return value >= kBrightPentatonic ? ScaleType::MajorPentatonic
+                                          : ScaleType::MinorPentatonic;
+    }
+
+    // Vivid *and* dark: reach for the most expressive minor colours.
+    if (saturation >= kVividSaturation) {
+        if (value < kHarmonicMinorLuma) return ScaleType::HarmonicMinor;
+        if (value < kBluesLuma) return ScaleType::BluesMinor;
+    }
+
+    // Otherwise pick a diatonic mode along the dark -> bright luminance axis.
+    static const ScaleType kModes[6] = {
+        ScaleType::Phrygian,  ScaleType::Aeolian, ScaleType::Dorian,
+        ScaleType::Mixolydian, ScaleType::Ionian,  ScaleType::Lydian};
+    int idx = static_cast<int>(value * 6.0);
+    if (idx < 0) idx = 0;
+    if (idx > 5) idx = 5;
+    return kModes[idx];
+}
+
 KeyDetection KeySelector::detect(const image::Image& image) const {
     const image::ColorSummary color = image::averageHueSaturation(image);
 
-    // A near-gray image has no reliable hue: fall back to A minor pentatonic,
-    // which is position 0 (C) resolved to its relative minor.
+    // A near-gray image has no reliable hue: fall back to A minor pentatonic
+    // (position 3 on the circle of fifths is A).
     if (color.saturation < kGrayscaleFloor) {
-        return buildDetection(color.hue, color.saturation, /*position=*/0,
-                              /*major=*/false);
+        return buildDetection(color.hue, color.saturation, color.value,
+                              /*position=*/3, ScaleType::MinorPentatonic);
     }
 
     int position =
@@ -86,8 +110,9 @@ KeyDetection KeySelector::detect(const image::Image& image) const {
         position += kCircleSize;
     }
 
-    const bool major = color.saturation >= kMajorThreshold;
-    return buildDetection(color.hue, color.saturation, position, major);
+    const ScaleType type = chooseScaleType(color.saturation, color.value);
+    return buildDetection(color.hue, color.saturation, color.value, position,
+                          type);
 }
 
 Scale KeySelector::keyFromImage(const image::Image& image) const {
@@ -102,7 +127,9 @@ Scale KeySelector::selectScale(KeyMode mode, const image::Image& image,
             return *scale;
         }
         // Empty library: fall back to the same default as a grayscale image.
-        return buildDetection(0.0, 0.0, /*position=*/0, /*major=*/false).scale;
+        return buildDetection(0.0, 0.0, 0.0, /*position=*/3,
+                              ScaleType::MinorPentatonic)
+            .scale;
     }
     return keyFromImage(image);
 }

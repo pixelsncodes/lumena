@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(Lumena
-    VERSION 0.1.0
+    VERSION 0.3.0
     DESCRIPTION "Image-driven melody generator core for a JUCE synth plugin"
     LANGUAGES CXX)
 
@@ -57,6 +57,7 @@ add_library(Lumena STATIC
     src/image/BrightnessGrid.cpp
     src/image/ColorAnalysis.cpp
     src/scales/Scale.cpp
+    src/scales/ScaleType.cpp
     src/scales/ScaleLibrary.cpp
     src/scales/KeySelector.cpp
     src/markov/TheoryWeights.cpp

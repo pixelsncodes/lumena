@@ -1,15 +1,29 @@
 {
-  "_comment": "Scales are defined by a root MIDI note plus a named interval pattern. To add a scale, add an entry to 'scales' referencing a pattern below (or define a new pattern). MIDI convention: middle C = C4 = 60, A4 = 69.",
+  "_comment": "Scales are defined by a root MIDI note plus a named interval pattern. To add a scale, add an entry to 'scales' referencing a pattern below (or define a new pattern). MIDI convention: middle C = C4 = 60, A4 = 69. Used by Random key mode; From-Image mode builds scales programmatically (see KeySelector / ScaleType).",
   "patterns": {
     "minor_pentatonic": [0, 3, 5, 7, 10],
-    "major_pentatonic": [0, 2, 4, 7, 9]
+    "major_pentatonic": [0, 2, 4, 7, 9],
+    "ionian":     [0, 2, 4, 5, 7, 9, 11],
+    "dorian":     [0, 2, 3, 5, 7, 9, 10],
+    "phrygian":   [0, 1, 3, 5, 7, 8, 10],
+    "lydian":     [0, 2, 4, 6, 7, 9, 11],
+    "mixolydian": [0, 2, 4, 5, 7, 9, 10],
+    "aeolian":    [0, 2, 3, 5, 7, 8, 10],
+    "blues_minor":    [0, 3, 5, 6, 7, 10],
+    "harmonic_minor": [0, 2, 3, 5, 7, 8, 11]
   },
   "scales": [
     { "name": "A Minor Pentatonic",  "root": 57, "pattern": "minor_pentatonic" },
-    { "name": "F# Minor Pentatonic", "root": 54, "pattern": "minor_pentatonic" },
     { "name": "C Major Pentatonic",  "root": 60, "pattern": "major_pentatonic" },
     { "name": "E Minor Pentatonic",  "root": 52, "pattern": "minor_pentatonic" },
     { "name": "G Major Pentatonic",  "root": 55, "pattern": "major_pentatonic" },
-    { "name": "D Major Pentatonic",  "root": 62, "pattern": "major_pentatonic" }
+    { "name": "D Dorian",            "root": 62, "pattern": "dorian" },
+    { "name": "E Phrygian",          "root": 64, "pattern": "phrygian" },
+    { "name": "F Lydian",            "root": 65, "pattern": "lydian" },
+    { "name": "G Mixolydian",        "root": 67, "pattern": "mixolydian" },
+    { "name": "A Minor",             "root": 57, "pattern": "aeolian" },
+    { "name": "C Major",             "root": 60, "pattern": "ionian" },
+    { "name": "A Blues",             "root": 57, "pattern": "blues_minor" },
+    { "name": "D Harmonic Minor",    "root": 62, "pattern": "harmonic_minor" }
   ]
 }

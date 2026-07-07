@@ -20,6 +20,7 @@ namespace {
 
 using lumena::image::BrightnessGrid;
 using lumena::image::Image;
+using lumena::melody::ArpPattern;
 using lumena::melody::CellPath;
 using lumena::melody::generateMelody;
 using lumena::melody::kMaxVelocity;
@@ -671,6 +672,368 @@ void test_cells_phrased_in_range_and_share_motif() {
     CHECK(checkedRepeat);
 }
 
+// ---- arpeggiator ------------------------------------------------------------
+
+// The set of all in-scale MIDI notes across `span` octaves.
+// The pitch-class set of the key's diatonic (major/natural-minor) scale — the
+// harmony the chords/arp draw from, whatever the melodic scale.
+std::set<int> keyScalePcs(const Scale& scale) {
+    const int major[7] = {0, 2, 4, 5, 7, 9, 11};
+    const int minor[7] = {0, 2, 3, 5, 7, 8, 10};
+    bool hasM3 = false, hasm3 = false;
+    for (int iv : scale.intervals) {
+        const int pc = ((iv % 12) + 12) % 12;
+        if (pc == 4) hasM3 = true;
+        if (pc == 3) hasm3 = true;
+    }
+    const int* st = (hasM3 && ! hasm3) ? major : minor;
+    const int tonicPc = ((scale.rootNote % 12) + 12) % 12;
+    std::set<int> pcs;
+    for (int k = 0; k < 7; ++k) pcs.insert((tonicPc + st[k]) % 12);
+    return pcs;
+}
+
+// True if three MIDI notes form a tertian triad by pitch class (some root with a
+// third and a fifth above), regardless of octave/inversion.
+bool isTriadByPitchClass(int a, int b, int c) {
+    std::set<int> pcs = {a % 12, b % 12, c % 12};
+    if (pcs.size() != 3) return false;
+    for (int root : pcs) {
+        const bool third = pcs.count((root + 3) % 12) || pcs.count((root + 4) % 12);
+        const bool fifth = pcs.count((root + 6) % 12) || pcs.count((root + 7) % 12);
+        if (third && fifth) return true;
+    }
+    return false;
+}
+
+// The diatonic triad tones the arp/chords build: root/third/fifth of the key's
+// tonic chord (major or minor per the scale) across `octaves`, voiced from MIDI
+// 48 — matching the engine's diatonicChord().
+std::set<int> diatonicTriadTones(const Scale& scale, int octaves) {
+    const int major[7] = {0, 2, 4, 5, 7, 9, 11};
+    const int minor[7] = {0, 2, 3, 5, 7, 8, 10};
+    bool hasM3 = false, hasm3 = false;
+    for (int iv : scale.intervals) {
+        const int pc = ((iv % 12) + 12) % 12;
+        if (pc == 4) hasM3 = true;
+        if (pc == 3) hasm3 = true;
+    }
+    const int* st = (hasM3 && ! hasm3) ? major : minor;
+    const int tonicPc = ((scale.rootNote % 12) + 12) % 12;
+    std::set<int> notes;
+    for (int o = 0; o < octaves; ++o)
+        for (int k = 0; k < 3; ++k)  // root, third, fifth
+            notes.insert(55 + 12 * o + tonicPc + st[(2 * k) % 7]);
+    return notes;
+}
+
+// Arp notes are chord tones drawn from the key, with velocity accents (not flat)
+// and a steady eighth-note count.
+void test_arpeggiator_chord_tones_and_rate() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = minorPentatonic();
+
+    MelodyOptions o;
+    o.mode = lumena::melody::GenerationMode::Arpeggio;
+    o.arpPattern = ArpPattern::Up;
+    o.arpOctaves = 2;
+    o.arpRate = 0.5;
+    o.loopBars = 2;  // 2 bars of eighths = 16 notes
+    std::mt19937 rng(11u);
+    const Melody m = generateMelody(grid, scale, o, rng);
+
+    CHECK(m.notes.size() == 16);
+    const std::set<int> keyPcs = keyScalePcs(scale);
+    std::set<int> vels;
+    for (const Note& n : m.notes) {
+        CHECK(keyPcs.count(n.noteNumber % 12) == 1);  // in the key (any octave)
+        vels.insert(n.velocity);
+    }
+    CHECK(vels.size() > 1);  // accents present, not flat velocity
+    CHECK(m.cells.size() == m.notes.size());
+}
+
+// The arp follows a moving progression: the chord changes across bars.
+void test_arpeggiator_progression_moves() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = minorPentatonic();
+
+    MelodyOptions o;
+    o.mode = lumena::melody::GenerationMode::Arpeggio;
+    o.arpPattern = ArpPattern::Up;
+    o.arpRate = 0.5;
+    o.loopBars = 4;
+    std::mt19937 rng(5u);
+    const Melody m = generateMelody(grid, scale, o, rng);
+
+    // Lowest note per bar (8 notes/bar); at least two distinct bass pitch classes
+    // means the harmony actually moves rather than a static chord.
+    std::set<int> bassPcs;
+    const int perBar = 8;
+    for (int bar = 0; bar * perBar < static_cast<int>(m.notes.size()); ++bar) {
+        int lo = 128;
+        for (int j = 0; j < perBar; ++j) {
+            const std::size_t idx = static_cast<std::size_t>(bar * perBar + j);
+            if (idx < m.notes.size()) lo = std::min(lo, m.notes[idx].noteNumber);
+        }
+        if (lo < 128) bassPcs.insert(lo % 12);
+    }
+    CHECK(bassPcs.size() >= 2);
+}
+
+// ---- loop -------------------------------------------------------------------
+
+double totalBeats(const Melody& m) {
+    double t = 0.0;
+    for (const Note& n : m.notes) t = std::max(t, n.startBeats + n.lengthBeats);
+    return t;
+}
+
+// Loop mode fills exactly loopBars bars, for the arpeggiator, chords, and the
+// phrased walk.
+void test_loop_fills_whole_bars() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = minorPentatonic();
+
+    for (int bars : {1, 2, 4, 8}) {
+        MelodyOptions arp;
+        arp.mode = lumena::melody::GenerationMode::Arpeggio;
+        arp.arpRate = 0.5;
+        arp.length = 7;  // ignored: loopBars drives the count
+        arp.loopBars = bars;
+        arp.beatsPerBar = 4.0;
+        std::mt19937 rng(2u);
+        const Melody m = generateMelody(grid, scale, arp, rng);
+        CHECK(std::abs(totalBeats(m) - bars * 4.0) < 1e-6);
+    }
+
+    // Chords: whole bars too, with every chord a stack of notes at one start.
+    {
+        MelodyOptions ch;
+        ch.mode = lumena::melody::GenerationMode::Chords;
+        ch.chordRate = 2.0;
+        ch.chordSize = 3;
+        ch.loopBars = 4;
+        ch.beatsPerBar = 4.0;
+        std::mt19937 rng(9u);
+        const Melody m = generateMelody(grid, scale, ch, rng);
+        CHECK(std::abs(totalBeats(m) - 4 * 4.0) < 1e-6);
+        CHECK(m.notes.size() % 3 == 0);  // triads
+    }
+
+    MelodyOptions phrased;
+    phrased.length = 16;
+    phrased.loopBars = 4;
+    phrased.beatsPerBar = 4.0;
+    std::mt19937 rng(2u);
+    const Melody m = generateMelody(grid, scale, phrased, rng);
+    const double bars = totalBeats(m) / phrased.beatsPerBar;
+    CHECK(std::abs(bars - std::round(bars)) < 1e-6);
+    CHECK(bars >= 4.0);  // at least the requested loop length
+}
+
+// Arpeggiator output is reproducible under a fixed seed.
+void test_arpeggiator_reproducible() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = minorPentatonic();
+
+    MelodyOptions o;
+    o.mode = lumena::melody::GenerationMode::Arpeggio;
+    o.arpPattern = ArpPattern::Random;
+    o.length = 16;
+    std::mt19937 a(42u), b(42u);
+    const Melody ma = generateMelody(grid, scale, o, a);
+    const Melody mb = generateMelody(grid, scale, o, b);
+    CHECK(ma.notes.size() == mb.notes.size());
+    bool identical = ma.notes.size() == mb.notes.size();
+    for (std::size_t i = 0; i < ma.notes.size() && identical; ++i) {
+        if (ma.notes[i].noteNumber != mb.notes[i].noteNumber ||
+            ma.notes[i].velocity != mb.notes[i].velocity) {
+            identical = false;
+        }
+    }
+    CHECK(identical);
+}
+
+// ---- chords -----------------------------------------------------------------
+
+// Chords mode emits groups of `chordSize` in-scale notes that share a start
+// Chords mode emits real triads in the key: each is `chordSize` notes sharing a
+// start beat, forming a tertian triad by pitch class (any inversion), all tones
+// diatonic to the key, with audible velocity.
+void test_chords_are_diatonic_stacks() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = minorPentatonic();
+
+    MelodyOptions o;
+    o.mode = lumena::melody::GenerationMode::Chords;
+    o.chordSize = 3;
+    o.energy = 0.5;      // one chord per bar
+    o.loopBars = 4;
+    o.beatsPerBar = 4.0;
+    std::mt19937 rng(4u);
+    const Melody m = generateMelody(grid, scale, o, rng);
+
+    CHECK(m.notes.size() % 3 == 0);
+    CHECK(m.notes.size() >= 12);
+    const std::set<int> keyPcs = keyScalePcs(scale);
+    for (std::size_t c = 0; c < m.notes.size(); c += 3) {
+        const double start = m.notes[c].startBeats;
+        for (int v = 0; v < 3; ++v) {
+            CHECK(m.notes[c + v].startBeats == start);           // sound together
+            CHECK(m.notes[c + v].velocity >= 60);                // present
+            CHECK(keyPcs.count(m.notes[c + v].noteNumber % 12) == 1);  // in key
+        }
+        CHECK(isTriadByPitchClass(m.notes[c].noteNumber,
+                                  m.notes[c + 1].noteNumber,
+                                  m.notes[c + 2].noteNumber));   // real triad
+    }
+}
+
+// ---- semantic axes ----------------------------------------------------------
+
+// Higher Energy raises overall velocity.
+void test_energy_raises_velocity() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = minorPentatonic();
+
+    auto meanVel = [&] (double energy) {
+        MelodyOptions o;
+        o.phraseMode = PhraseMode::Freeform;
+        o.length = 24;
+        o.energy = energy;
+        std::mt19937 rng(3u);
+        const Melody m = generateMelody(grid, scale, o, rng);
+        long sum = 0;
+        for (const Note& n : m.notes) sum += n.velocity;
+        return static_cast<double>(sum) / static_cast<double>(m.notes.size());
+    };
+
+    CHECK(meanVel(0.9) > meanVel(0.1));
+}
+
+// Repetition = 1 makes at least one body phrase repeat the motif verbatim.
+void test_repetition_repeats_motif() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = minorPentatonic();
+
+    MelodyOptions o;
+    o.phraseMode = PhraseMode::Phrased;
+    o.length = 32;
+    o.repetition = 1.0;
+    o.arpeggioAmount = 0.0;  // no ornaments, so a repeat stays verbatim
+    std::mt19937 rng(1u);
+    const Melody m = generateMelody(grid, scale, o, rng);
+
+    CHECK(m.phraseStarts.size() >= 3);
+    // Motif = the first phrase's degree sequence.
+    const std::size_t m0 = m.phraseStarts[0];
+    const std::size_t m1 = m.phraseStarts[1];
+    std::vector<int> motif (m.degrees.begin() + static_cast<long>(m0),
+                            m.degrees.begin() + static_cast<long>(m1));
+    int verbatim = 0;
+    for (std::size_t p = 1; p + 1 < m.phraseStarts.size(); ++p) {
+        const std::size_t s = m.phraseStarts[p];
+        const std::size_t e = m.phraseStarts[p + 1];
+        std::vector<int> seg (m.degrees.begin() + static_cast<long>(s),
+                              m.degrees.begin() + static_cast<long>(e));
+        if (seg == motif) ++verbatim;
+    }
+    CHECK(verbatim >= 1);
+}
+
+// ---- lock-aware recombination + mutation ------------------------------------
+
+void test_recombine_locks_dimensions() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = minorPentatonic();
+
+    MelodyOptions o;
+    o.phraseMode = PhraseMode::Freeform;  // fixed length: base and cand align
+    o.length = 16;
+    std::mt19937 a(7u), b(99u);
+    const Melody base = generateMelody(grid, scale, o, a);
+    const Melody cand = generateMelody(grid, scale, o, b);
+
+    // Lock rhythm: timings from base, pitches from candidate.
+    const Melody lr = recombineLocked(base, cand, scale, { true, false }, o);
+    bool timingFromBase = true, pitchFromCand = true;
+    for (std::size_t i = 0; i < lr.notes.size(); ++i) {
+        if (lr.notes[i].startBeats != base.notes[i].startBeats ||
+            lr.notes[i].lengthBeats != base.notes[i].lengthBeats)
+            timingFromBase = false;
+        if (lr.notes[i].noteNumber != cand.notes[i].noteNumber)
+            pitchFromCand = false;
+    }
+    CHECK(timingFromBase);
+    CHECK(pitchFromCand);
+
+    // Lock pitch: pitches from base, timings from candidate.
+    const Melody lp = recombineLocked(base, cand, scale, { false, true }, o);
+    bool pitchFromBase = true, timingFromCand = true;
+    for (std::size_t i = 0; i < lp.notes.size(); ++i) {
+        if (lp.notes[i].noteNumber != base.notes[i].noteNumber)
+            pitchFromBase = false;
+        if (lp.notes[i].startBeats != cand.notes[i].startBeats ||
+            lp.notes[i].lengthBeats != cand.notes[i].lengthBeats)
+            timingFromCand = false;
+    }
+    CHECK(pitchFromBase);
+    CHECK(timingFromCand);
+
+    // Both locked -> unchanged base; neither -> the candidate.
+    const Melody both = recombineLocked(base, cand, scale, { true, true }, o);
+    CHECK(both.notes.size() == base.notes.size());
+    const Melody none = recombineLocked(base, cand, scale, { false, false }, o);
+    CHECK(none.notes.size() == cand.notes.size());
+}
+
+void test_mutate_respects_locks() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = minorPentatonic();
+
+    MelodyOptions o;
+    o.phraseMode = PhraseMode::Freeform;
+    o.length = 24;
+    std::mt19937 g(5u);
+    const Melody base = generateMelody(grid, scale, o, g);
+
+    // Lock pitch: mutate may retime but never repitches.
+    std::mt19937 r1(11u);
+    const Melody mp = mutate(base, scale, { false, true }, 0.6, o, r1);
+    bool pitchesHeld = mp.notes.size() == base.notes.size();
+    for (std::size_t i = 0; i < mp.notes.size() && pitchesHeld; ++i)
+        if (mp.notes[i].noteNumber != base.notes[i].noteNumber)
+            pitchesHeld = false;
+    CHECK(pitchesHeld);
+
+    // Lock rhythm: mutate may repitch but never retimes.
+    std::mt19937 r2(11u);
+    const Melody mr = mutate(base, scale, { true, false }, 0.6, o, r2);
+    bool timingHeld = mr.notes.size() == base.notes.size();
+    for (std::size_t i = 0; i < mr.notes.size() && timingHeld; ++i)
+        if (mr.notes[i].startBeats != base.notes[i].startBeats ||
+            mr.notes[i].lengthBeats != base.notes[i].lengthBeats)
+            timingHeld = false;
+    CHECK(timingHeld);
+
+    // Mutating some notes actually changed at least one pitch here.
+    bool anyPitchChange = false;
+    for (std::size_t i = 0; i < mr.notes.size(); ++i)
+        if (mr.notes[i].noteNumber != base.notes[i].noteNumber)
+            anyPitchChange = true;
+    CHECK(anyPitchChange);
+}
+
 }  // namespace
 
 void run_melody_generator_tests() {
@@ -689,4 +1052,13 @@ void run_melody_generator_tests() {
     test_cells_in_range_pure_random();
     test_cells_reproducible();
     test_cells_phrased_in_range_and_share_motif();
+    test_arpeggiator_chord_tones_and_rate();
+    test_arpeggiator_progression_moves();
+    test_loop_fills_whole_bars();
+    test_arpeggiator_reproducible();
+    test_chords_are_diatonic_stacks();
+    test_energy_raises_velocity();
+    test_repetition_repeats_motif();
+    test_recombine_locks_dimensions();
+    test_mutate_respects_locks();
 }

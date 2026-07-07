@@ -59,16 +59,20 @@ void test_json_loading() {
     ScaleLibrary lib;
     const std::string path = std::string(LUMENA_CONFIG_DIR) + "/scales.json";
     CHECK(lib.loadFromFile(path));
-    CHECK(lib.size() == 6);
+    CHECK(lib.size() == 12);
 
     struct Expected {
         const char* name;
         int root;
+        std::size_t degrees;
     };
     const std::vector<Expected> expected = {
-        {"A Minor Pentatonic", 57},  {"F# Minor Pentatonic", 54},
-        {"C Major Pentatonic", 60},  {"E Minor Pentatonic", 52},
-        {"G Major Pentatonic", 55},  {"D Major Pentatonic", 62},
+        {"A Minor Pentatonic", 57, 5}, {"C Major Pentatonic", 60, 5},
+        {"E Minor Pentatonic", 52, 5}, {"G Major Pentatonic", 55, 5},
+        {"D Dorian", 62, 7},           {"E Phrygian", 64, 7},
+        {"F Lydian", 65, 7},           {"G Mixolydian", 67, 7},
+        {"A Minor", 57, 7},            {"C Major", 60, 7},
+        {"A Blues", 57, 6},            {"D Harmonic Minor", 62, 7},
     };
 
     for (const auto& e : expected) {
@@ -76,7 +80,7 @@ void test_json_loading() {
         CHECK(scale.has_value());
         if (scale) {
             CHECK(scale->rootNote == e.root);
-            CHECK(scale->intervals.size() == 5);  // all pentatonic
+            CHECK(scale->intervals.size() == e.degrees);
         }
     }
 
