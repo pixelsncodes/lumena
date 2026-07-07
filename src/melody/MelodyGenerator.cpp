@@ -127,6 +127,7 @@ Melody generateFreeform(const BrightnessGrid& grid, const Scale& scale,
         options.length > 0 ? options.length : static_cast<int>(grid.cellCount());
     melody.notes.reserve(static_cast<std::size_t>(length));
     melody.degrees.reserve(static_cast<std::size_t>(length));
+    melody.cells.reserve(static_cast<std::size_t>(length));
 
     std::uniform_int_distribution<int> colDist(0, cols - 1);
     std::uniform_int_distribution<int> rowDist(0, rows - 1);
@@ -161,6 +162,7 @@ Melody generateFreeform(const BrightnessGrid& grid, const Scale& scale,
 
         melody.notes.push_back(note);
         melody.degrees.push_back(static_cast<int>(degree));
+        melody.cells.push_back(GridCell{col, row});
         beat += note.lengthBeats;
     }
 
@@ -178,6 +180,11 @@ struct PhraseNote {
     int velocity = 0;
     double lengthBeats = 1.0;
     float brightness = 0.0f;
+    // The grid cell this note was sampled from. Preserved through motif
+    // variation (A'/A'' copy the motif's cells) and ornamentation (an arpeggio
+    // figure inherits its origin note's cell), so it survives into Melody::cells.
+    int col = 0;
+    int row = 0;
 };
 
 // State the phrase builder threads through generation: the grid walk position,
@@ -255,6 +262,8 @@ public:
         note.noteNumber = scale_.noteAt(tonic, options_.octaveSpan);
         note.velocity = brightnessToVelocity(brightness);
         note.brightness = brightness;
+        note.col = col_;
+        note.row = row_;
         // A half note, or occasionally a whole note, to breathe at the end.
         std::uniform_real_distribution<double> coin(0.0, 1.0);
         note.lengthBeats = coin(rng_) < 0.5 ? kCadenceBeats : 2.0 * kCadenceBeats;
@@ -365,6 +374,8 @@ public:
             n.noteNumber = scale_.noteAt(deg, options_.octaveSpan);
             n.velocity = src.velocity;
             n.brightness = src.brightness;
+            n.col = src.col;
+            n.row = src.row;
             n.lengthBeats = each;
             figure.push_back(n);
         }
@@ -464,6 +475,8 @@ private:
         note.noteNumber = scale_.noteAt(note.degree, options_.octaveSpan);
         note.velocity = brightnessToVelocity(brightness);
         note.brightness = brightness;
+        note.col = col_;
+        note.row = row_;
         note.lengthBeats = (options_.rhythm == RhythmMode::Flowing)
                                ? flowingDuration(brightness, rng_)
                                : 1.0;
@@ -584,6 +597,7 @@ Melody generatePhrased(const BrightnessGrid& grid, const Scale& scale,
             note.lengthBeats = pn.lengthBeats;
             melody.notes.push_back(note);
             melody.degrees.push_back(pn.degree);
+            melody.cells.push_back(GridCell{pn.col, pn.row});
             beat += pn.lengthBeats;
         }
     }

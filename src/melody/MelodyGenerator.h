@@ -97,12 +97,28 @@ int brightnessToVelocity(float brightness) noexcept;
 /// Consumes one draw from `rng`.
 double flowingDuration(float brightness, std::mt19937& rng);
 
+/// The brightness-grid cell (column, row) a note was sampled from. Columns and
+/// rows are 0-based, matching image::BrightnessGrid's row-major layout, so a
+/// host can map a note back to the region of the image that produced it (e.g.
+/// to highlight that cell while the note sounds).
+struct GridCell {
+    int col = 0;
+    int row = 0;
+};
+
 /// A generated melody: the MIDI-ready notes plus, in parallel, the scale-degree
 /// index each note landed on. The degree track lets callers reason about
 /// melodic intervals in scale steps without inverting the note mapping.
 struct Melody {
     std::vector<midi::Note> notes;
     std::vector<int> degrees;
+
+    /// The source grid cell for each note, in parallel with `notes` (so
+    /// `cells.size() == notes.size()`). A note produced by transposing a motif
+    /// (the A'/A'' variations) carries the cell of the motif note it derives
+    /// from; the notes of an arpeggio ornament all carry their origin note's
+    /// cell. Lets a host trace the melody's path across the image.
+    std::vector<GridCell> cells;
 
     /// In Phrased mode, the index into `notes`/`degrees` where each phrase
     /// begins (the first entry is always 0). Empty in Freeform mode. Lets

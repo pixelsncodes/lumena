@@ -520,6 +520,157 @@ void test_phrased_ending_is_stepwise() {
     }
 }
 
+// ---- source cells: parallel track, in range, and tracking the walk ----------
+
+// True when cells `a` and `b` are 8-connected neighbours on a cols x rows grid
+// whose edges wrap — i.e. the per-axis distance is 0, 1, or a full wrap
+// (cols-1 / rows-1), and they are not the same cell.
+bool wrapAdjacent(const lumena::melody::GridCell& a,
+                  const lumena::melody::GridCell& b, int cols, int rows) {
+    auto axisOk = [](int p, int q, int span) {
+        const int d = std::abs(p - q);
+        return d == 0 || d == 1 || d == span - 1;
+    };
+    if (a.col == b.col && a.row == b.row) return false;  // the walk always moves
+    return axisOk(a.col, b.col, cols) && axisOk(a.row, b.row, rows);
+}
+
+void test_cells_track_walk_freeform() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const int cols = 16, rows = 12;
+    const BrightnessGrid grid(image, cols, rows);
+    const Scale scale = minorPentatonic();
+
+    MelodyOptions opts;
+    opts.length = 40;
+    opts.phraseMode = PhraseMode::Freeform;
+    opts.cellPath = CellPath::RandomWalk;
+
+    std::mt19937 rng(12345u);
+    const Melody melody = generateMelody(grid, scale, opts, rng);
+
+    // One source cell per note.
+    CHECK(melody.cells.size() == melody.notes.size());
+
+    bool inRange = true;
+    for (const auto& c : melody.cells) {
+        if (c.col < 0 || c.col >= cols || c.row < 0 || c.row >= rows)
+            inRange = false;
+    }
+    CHECK(inRange);
+
+    // The first note sits on the centre cell; every step after is an 8-connected
+    // (wrapping) neighbour of the previous cell — the cells trace the walk.
+    CHECK(melody.cells[0].col == cols / 2);
+    CHECK(melody.cells[0].row == rows / 2);
+    bool adjacent = true;
+    for (std::size_t i = 1; i < melody.cells.size(); ++i) {
+        if (!wrapAdjacent(melody.cells[i - 1], melody.cells[i], cols, rows))
+            adjacent = false;
+    }
+    CHECK(adjacent);
+}
+
+void test_cells_in_range_pure_random() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const int cols = 16, rows = 12;
+    const BrightnessGrid grid(image, cols, rows);
+    const Scale scale = minorPentatonic();
+
+    MelodyOptions opts;
+    opts.length = 30;
+    opts.phraseMode = PhraseMode::Freeform;
+    opts.cellPath = CellPath::PureRandom;
+
+    std::mt19937 rng(2u);
+    const Melody melody = generateMelody(grid, scale, opts, rng);
+
+    CHECK(melody.cells.size() == melody.notes.size());
+    bool inRange = true;
+    std::set<int> distinctCols;
+    for (const auto& c : melody.cells) {
+        if (c.col < 0 || c.col >= cols || c.row < 0 || c.row >= rows)
+            inRange = false;
+        distinctCols.insert(c.col);
+    }
+    CHECK(inRange);
+    CHECK(distinctCols.size() > 1);  // pure-random cells jump around
+}
+
+void test_cells_reproducible() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = minorPentatonic();
+
+    MelodyOptions opts;
+    opts.length = 40;
+    opts.phraseMode = PhraseMode::Phrased;  // exercise the phrased cell path too
+
+    std::mt19937 r1(99u);
+    std::mt19937 r2(99u);
+    const Melody a = generateMelody(grid, scale, opts, r1);
+    const Melody b = generateMelody(grid, scale, opts, r2);
+
+    bool same = a.cells.size() == b.cells.size();
+    for (std::size_t i = 0; i < a.cells.size() && same; ++i) {
+        if (a.cells[i].col != b.cells[i].col ||
+            a.cells[i].row != b.cells[i].row)
+            same = false;
+    }
+    CHECK(same);
+}
+
+void test_cells_phrased_in_range_and_share_motif() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const int cols = 16, rows = 12;
+    const BrightnessGrid grid(image, cols, rows);
+    const Scale scale = minorPentatonic();
+
+    MelodyOptions opts;
+    opts.length = 32;
+    opts.phraseMode = PhraseMode::Phrased;
+    opts.arpeggioAmount = 0.0;  // keep phrase note counts exact for comparison
+
+    std::mt19937 rng(2024u);
+    const Melody melody = generateMelody(grid, scale, opts, rng);
+
+    CHECK(melody.cells.size() == melody.notes.size());
+    bool inRange = true;
+    for (const auto& c : melody.cells) {
+        if (c.col < 0 || c.col >= cols || c.row < 0 || c.row >= rows)
+            inRange = false;
+    }
+    CHECK(inRange);
+
+    // A' (a phrase whose degree deltas match the motif) is a transposition of
+    // the motif and re-traces the motif's cells — so a matching-delta phrase
+    // must carry cell-for-cell identical source cells.
+    const std::vector<std::size_t>& starts = melody.phraseStarts;
+    CHECK(starts.size() >= 4);
+    const std::vector<int> motif =
+        phraseDeltas(melody.degrees, starts[0], starts[1]);
+    const std::size_t motifLen = starts[1] - starts[0];
+
+    bool checkedRepeat = false;
+    for (std::size_t p = 1; p + 1 < starts.size(); ++p) {
+        if (starts[p + 1] - starts[p] != motifLen) continue;
+        if (phraseDeltas(melody.degrees, starts[p], starts[p + 1]) != motif)
+            continue;
+        bool sameCells = true;
+        for (std::size_t k = 0; k < motifLen; ++k) {
+            if (melody.cells[starts[0] + k].col !=
+                    melody.cells[starts[p] + k].col ||
+                melody.cells[starts[0] + k].row !=
+                    melody.cells[starts[p] + k].row)
+                sameCells = false;
+        }
+        CHECK(sameCells);
+        checkedRepeat = true;
+        break;
+    }
+    CHECK(checkedRepeat);
+}
+
 }  // namespace
 
 void run_melody_generator_tests() {
@@ -534,4 +685,8 @@ void run_melody_generator_tests() {
     test_phrased_arpeggios_in_scale();
     test_phrased_dynamics_peak_mid_phrase();
     test_phrased_ending_is_stepwise();
+    test_cells_track_walk_freeform();
+    test_cells_in_range_pure_random();
+    test_cells_reproducible();
+    test_cells_phrased_in_range_and_share_motif();
 }
