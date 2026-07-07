@@ -8,7 +8,6 @@
 #include <cstdio>
 
 #include "Lumena.h"
-#include "markov/MarkovChain.h"
 #include "midi/MidiSequence.h"
 #include "test_util.h"
 
@@ -17,16 +16,12 @@ void run_image_tests();
 void run_color_analysis_tests();
 void run_scale_tests();
 void run_key_selector_tests();
+void run_markov_tests();
 
 namespace {
 
 void test_version() {
     CHECK(!lumena::version().empty());
-}
-
-void test_markov() {
-    lumena::markov::MarkovChain chain(7);
-    CHECK(chain.stateCount() == 7);
 }
 
 void test_midi() {
@@ -47,12 +42,12 @@ int main() {
     std::printf("----------------------------------------\n");
 
     test_version();
-    test_markov();
     test_midi();
     run_image_tests();
     run_color_analysis_tests();
     run_scale_tests();
     run_key_selector_tests();
+    run_markov_tests();
 
     const int checks = lumena::test::checkCount();
     const int failures = lumena::test::failureCount();

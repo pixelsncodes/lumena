@@ -13,11 +13,12 @@
 ///   - scales/ : musical scales rooted at a MIDI note (Scale), loaded from
 ///               JSON config (ScaleLibrary) or chosen from image colour via
 ///               the circle of fifths (KeySelector)
-///   - markov/ : drive note-to-note transitions with a Markov chain
+///   - markov/ : music-theory-weighted Markov chain over scale degrees
+///               (TheoryWeights, TransitionMatrix, MelodyChain)
 ///   - midi/   : assemble the generated notes into a MIDI sequence
 ///
-/// The image and scales stages are implemented; the markov and midi stages are
-/// still skeletons whose feature logic is not written yet.
+/// The image, scales and markov stages are implemented; the midi stage is
+/// still a skeleton whose feature logic is not written yet.
 
 namespace lumena {
 

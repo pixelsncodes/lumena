@@ -59,7 +59,9 @@ add_library(Lumena STATIC
     src/scales/Scale.cpp
     src/scales/ScaleLibrary.cpp
     src/scales/KeySelector.cpp
-    src/markov/MarkovChain.cpp
+    src/markov/TheoryWeights.cpp
+    src/markov/TransitionMatrix.cpp
+    src/markov/MelodyChain.cpp
     src/midi/MidiSequence.cpp)
 
 add_library(Lumena::Lumena ALIAS Lumena)

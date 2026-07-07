@@ -9,8 +9,16 @@
     "defaultVelocity": 100
   },
   "markov": {
-    "order": 1,
-    "temperature": 1.0
+    "octaveSpan": 2,
+    "theory": {
+      "intervalDecay": 0.5,
+      "repeatWeight": 0.5,
+      "thirdRepeatDamping": 0.25,
+      "tonicGravity": 0.4,
+      "centerGravity": 0.3,
+      "leapThreshold": 2.0,
+      "leapResolution": 4.0
+    }
   },
   "defaultScale": "pentatonic_minor"
 }
