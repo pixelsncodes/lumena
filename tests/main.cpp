@@ -14,7 +14,9 @@
 
 // Defined in their respective test translation units.
 void run_image_tests();
+void run_color_analysis_tests();
 void run_scale_tests();
+void run_key_selector_tests();
 
 namespace {
 
@@ -48,7 +50,9 @@ int main() {
     test_markov();
     test_midi();
     run_image_tests();
+    run_color_analysis_tests();
     run_scale_tests();
+    run_key_selector_tests();
 
     const int checks = lumena::test::checkCount();
     const int failures = lumena::test::failureCount();

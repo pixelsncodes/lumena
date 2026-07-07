@@ -1,7 +1,9 @@
 add_executable(LumenaTests
     main.cpp
     ImageTests.cpp
-    ScaleTests.cpp)
+    ColorAnalysisTests.cpp
+    ScaleTests.cpp
+    KeySelectorTests.cpp)
 
 target_link_libraries(LumenaTests
     PRIVATE

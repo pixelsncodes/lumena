@@ -55,8 +55,10 @@ add_library(Lumena STATIC
     src/Lumena.cpp
     src/image/Image.cpp
     src/image/BrightnessGrid.cpp
+    src/image/ColorAnalysis.cpp
     src/scales/Scale.cpp
     src/scales/ScaleLibrary.cpp
+    src/scales/KeySelector.cpp
     src/markov/MarkovChain.cpp
     src/midi/MidiSequence.cpp)
 

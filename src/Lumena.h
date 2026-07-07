@@ -7,10 +7,12 @@
 ///
 /// Lumena turns an image into a MIDI melody. The pipeline is split into
 /// four stages, each living in its own subdirectory under src/:
-///   - image/  : load an image (Image) and reduce it to a normalised
-///               brightness grid (BrightnessGrid)
+///   - image/  : load an image (Image), reduce it to a normalised brightness
+///               grid (BrightnessGrid) and summarise its hue/saturation
+///               (ColorAnalysis)
 ///   - scales/ : musical scales rooted at a MIDI note (Scale), loaded from
-///               JSON config (ScaleLibrary)
+///               JSON config (ScaleLibrary) or chosen from image colour via
+///               the circle of fifths (KeySelector)
 ///   - markov/ : drive note-to-note transitions with a Markov chain
 ///   - midi/   : assemble the generated notes into a MIDI sequence
 ///
