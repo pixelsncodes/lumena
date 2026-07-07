@@ -19,10 +19,15 @@ generates a `.mid` file from any image.
   circle of fifths to pick a key, and its saturation to major vs. relative
   minor pentatonic. All 24 keys are available; extra named scales load from
   `config/scales.json`.
-- **Melody generation** (`src/markov/`) — a music-theory-weighted, first-order
-  Markov chain over scale degrees, with dynamic voice-leading rules (leap
-  resolution, third-repeat damping) and an image-brightness bias hook. Fully
-  reproducible from a fixed RNG seed.
+- **Melody generation** (`src/markov/`, `src/melody/`) — a music-theory-weighted,
+  first-order Markov chain over scale degrees, with dynamic voice-leading rules
+  (leap resolution, third-repeat damping) and an image-brightness bias hook. On
+  top of the walk, a **phrase layer** (the default `Phrased` mode) shapes the
+  output into a motif (A), a transposed variation (A′), a contrasting phrase (B)
+  and a tonic cadence — extended as `A A′ B A″ …` for longer sequences — with
+  probabilistic rests between phrases, tonic/fifth-leaning phrase endings and
+  occasional arpeggio ornaments. The original flat walk remains available as
+  `Freeform` mode. Fully reproducible from a fixed RNG seed.
 - **MIDI export** (`src/midi/`) — a **dependency-free** Standard MIDI File
   writer. Converts beat-timed notes to a tick-based event stream (correct
   note-off-before-note-on ordering at equal ticks) and serialises format-0 SMF
@@ -76,13 +81,25 @@ optionally writes a MIDI file:
 ```sh
 ./build/bin/lumena_demo path/to/image.png --out melody.mid
 # optional: --seed N  (reproducible melody)  --tempo BPM  (default 120)
+#           --rhythm straight|flowing  (default flowing: brightness-shaped
+#                                       eighth/quarter/half notes)
+#           --length N   (number of notes; default one per grid cell. In
+#                         phrased mode this is an approximate target — whole
+#                         phrases plus a closing cadence may run slightly over)
+#           --cells walk|random  (default walk: the melody wanders the image
+#                                 for a smooth line; random teleports per note)
+#           --mode phrased|freeform  (default phrased: motif/variation/contrast/
+#                                     cadence phrases with rests and ornaments;
+#                                     freeform is the plain flat walk)
+#           --arp 0..1   (phrased-mode arpeggio-ornament probability per phrase;
+#                         default 0.15, prefers cells brighter than 0.7)
 ```
 
 ```
 Loaded path/to/image.png (128x128)
 Detected key: G Major Pentatonic (hue 37°, saturation 0.74)
-Generated 192 notes at 120 BPM
-Wrote MIDI file: melody.mid (384 events)
+Generated 34 notes at 120 BPM (phrased mode, flowing rhythm, walk cells)
+Wrote MIDI file: melody.mid (64 events)
 ```
 
 The resulting `melody.mid` opens in any DAW or MIDI player.

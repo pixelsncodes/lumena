@@ -5,7 +5,8 @@ add_executable(LumenaTests
     ScaleTests.cpp
     KeySelectorTests.cpp
     MarkovTests.cpp
-    MidiTests.cpp)
+    MidiTests.cpp
+    MelodyGeneratorTests.cpp)
 
 target_link_libraries(LumenaTests
     PRIVATE

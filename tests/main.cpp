@@ -17,6 +17,7 @@ void run_scale_tests();
 void run_key_selector_tests();
 void run_markov_tests();
 void run_midi_tests();
+void run_melody_generator_tests();
 
 namespace {
 
@@ -37,6 +38,7 @@ int main() {
     run_key_selector_tests();
     run_markov_tests();
     run_midi_tests();
+    run_melody_generator_tests();
 
     const int checks = lumena::test::checkCount();
     const int failures = lumena::test::failureCount();

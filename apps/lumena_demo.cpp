@@ -3,6 +3,9 @@
 //
 // Usage:
 //   lumena_demo <image> [--out melody.mid] [--seed N] [--tempo BPM]
+//                       [--rhythm straight|flowing] [--length N]
+//                       [--cells walk|random] [--mode phrased|freeform]
+//                       [--arp 0..1]
 //
 // It runs the full standalone pipeline end to end — image -> brightness grid ->
 // circle-of-fifths key -> theory-weighted Markov walk -> MIDI notes — so it
@@ -18,42 +21,40 @@
 
 #include "image/BrightnessGrid.h"
 #include "image/Image.h"
-#include "markov/MelodyChain.h"
-#include "markov/TheoryWeights.h"
-#include "markov/TransitionMatrix.h"
+#include "melody/MelodyGenerator.h"
 #include "midi/MidiFileWriter.h"
 #include "midi/MidiSequence.h"
 #include "scales/KeySelector.h"
-#include "scales/Scale.h"
-#include "scales/ScaleLibrary.h"
 
 namespace {
 
 using lumena::image::BrightnessGrid;
 using lumena::image::Image;
-using lumena::markov::MelodyChain;
-using lumena::markov::TheoryWeights;
-using lumena::markov::TransitionMatrix;
+using lumena::melody::CellPath;
+using lumena::melody::Melody;
+using lumena::melody::MelodyOptions;
+using lumena::melody::PhraseMode;
+using lumena::melody::RhythmMode;
 using lumena::midi::MidiFileWriter;
 using lumena::midi::MidiSequence;
 using lumena::midi::Note;
 using lumena::scales::KeyDetection;
 using lumena::scales::KeySelector;
-using lumena::scales::mapBrightnessToDegree;
-using lumena::scales::Scale;
 
 struct Options {
-    std::string imagePath;
-    std::string outPath;      // empty -> do not write a file
-    unsigned    seed  = 20260707u;
-    double      tempo = 120.0;
-    int         octaveSpan = 2;
+    std::string   imagePath;
+    std::string   outPath;      // empty -> do not write a file
+    unsigned      seed  = 20260707u;
+    double        tempo = 120.0;
+    MelodyOptions melody;       // rhythm/cells/length/bias default to musical values
 };
 
 void printUsage(const char* argv0) {
     std::fprintf(stderr,
-                 "Usage: %s <image> [--out melody.mid] [--seed N] "
-                 "[--tempo BPM]\n",
+                 "Usage: %s <image> [--out melody.mid] [--seed N] [--tempo BPM]\n"
+                 "          [--rhythm straight|flowing] [--length N] "
+                 "[--cells walk|random]\n"
+                 "          [--mode phrased|freeform] [--arp 0..1]\n",
                  argv0);
 }
 
@@ -66,6 +67,40 @@ bool parseArgs(int argc, char** argv, Options& opts) {
             opts.seed = static_cast<unsigned>(std::strtoul(argv[++i], nullptr, 10));
         } else if (arg == "--tempo" && i + 1 < argc) {
             opts.tempo = std::strtod(argv[++i], nullptr);
+        } else if (arg == "--length" && i + 1 < argc) {
+            opts.melody.length = static_cast<int>(std::strtol(argv[++i], nullptr, 10));
+        } else if (arg == "--rhythm" && i + 1 < argc) {
+            const std::string mode = argv[++i];
+            if (mode == "straight") {
+                opts.melody.rhythm = RhythmMode::Straight;
+            } else if (mode == "flowing") {
+                opts.melody.rhythm = RhythmMode::Flowing;
+            } else {
+                std::fprintf(stderr, "Unknown --rhythm mode: %s\n", mode.c_str());
+                return false;
+            }
+        } else if (arg == "--cells" && i + 1 < argc) {
+            const std::string mode = argv[++i];
+            if (mode == "walk") {
+                opts.melody.cellPath = CellPath::RandomWalk;
+            } else if (mode == "random") {
+                opts.melody.cellPath = CellPath::PureRandom;
+            } else {
+                std::fprintf(stderr, "Unknown --cells mode: %s\n", mode.c_str());
+                return false;
+            }
+        } else if (arg == "--mode" && i + 1 < argc) {
+            const std::string mode = argv[++i];
+            if (mode == "phrased") {
+                opts.melody.phraseMode = PhraseMode::Phrased;
+            } else if (mode == "freeform") {
+                opts.melody.phraseMode = PhraseMode::Freeform;
+            } else {
+                std::fprintf(stderr, "Unknown --mode: %s\n", mode.c_str());
+                return false;
+            }
+        } else if (arg == "--arp" && i + 1 < argc) {
+            opts.melody.arpeggioAmount = std::strtod(argv[++i], nullptr);
         } else if (arg == "-h" || arg == "--help") {
             return false;
         } else if (!arg.empty() && arg[0] == '-') {
@@ -79,47 +114,6 @@ bool parseArgs(int argc, char** argv, Options& opts) {
         }
     }
     return !opts.imagePath.empty();
-}
-
-// Walks the brightness grid, steering a theory-weighted Markov chain toward the
-// scale degree each cell's brightness suggests, and emits one quarter note per
-// cell.
-std::vector<Note> generateMelody(const BrightnessGrid& grid, const Scale& scale,
-                                 int octaveSpan, unsigned seed) {
-    const TheoryWeights weights;
-    const std::size_t degreesPerOctave = scale.degreesPerOctave();
-    const int totalDegrees = scale.usableDegrees(octaveSpan);
-
-    std::vector<Note> notes;
-    if (totalDegrees <= 0 || degreesPerOctave == 0) {
-        return notes;
-    }
-
-    const TransitionMatrix matrix = TransitionMatrix::fromTheory(
-        static_cast<std::size_t>(totalDegrees), degreesPerOctave, weights);
-    std::mt19937 rng(seed);
-    MelodyChain chain(matrix, rng, weights);
-
-    // Start in the middle of the range so the walk has room in both directions.
-    std::size_t degree = static_cast<std::size_t>(totalDegrees / 2);
-
-    const std::vector<float>& cells = grid.values();
-    notes.reserve(cells.size());
-    double beat = 0.0;
-    for (float brightness : cells) {
-        const int target = mapBrightnessToDegree(brightness, totalDegrees);
-        // Blend the Markov motion with the image's suggested degree.
-        degree = chain.nextBiased(degree, static_cast<float>(target), 0.5f);
-
-        Note note;
-        note.noteNumber = scale.noteAt(static_cast<int>(degree), octaveSpan);
-        note.velocity = 96;
-        note.startBeats = beat;
-        note.lengthBeats = 1.0;
-        notes.push_back(note);
-        beat += 1.0;
-    }
-    return notes;
 }
 
 }  // namespace
@@ -147,9 +141,16 @@ int main(int argc, char** argv) {
     std::printf("Detected key: %s (hue %.0f°, saturation %.2f)\n",
                 detection.keyName.c_str(), detection.hue, detection.saturation);
 
-    const std::vector<Note> notes =
-        generateMelody(grid, detection.scale, opts.octaveSpan, opts.seed);
-    std::printf("Generated %zu notes at %.0f BPM\n", notes.size(), opts.tempo);
+    std::mt19937 rng(opts.seed);
+    const Melody melody =
+        lumena::melody::generateMelody(grid, detection.scale, opts.melody, rng);
+    const std::vector<Note>& notes = melody.notes;
+    std::printf("Generated %zu notes at %.0f BPM (%s mode, %s rhythm, %s cells)\n",
+                notes.size(), opts.tempo,
+                opts.melody.phraseMode == PhraseMode::Phrased ? "phrased"
+                                                              : "freeform",
+                opts.melody.rhythm == RhythmMode::Flowing ? "flowing" : "straight",
+                opts.melody.cellPath == CellPath::RandomWalk ? "walk" : "random");
 
     const MidiSequence sequence(notes, opts.tempo, MidiSequence::kDefaultPpq);
 
