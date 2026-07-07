@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(LumenMelody
+project(Lumena
     VERSION 0.1.0
     DESCRIPTION "Image-driven melody generator core for a JUCE synth plugin"
     LANGUAGES CXX)
@@ -20,16 +20,16 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 # Detect whether we are the top-level project (standalone) or a subproject
 # pulled into a larger build such as the JUCE plugin.
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-    set(LUMENMELODY_STANDALONE ON)
+    set(LUMENA_STANDALONE ON)
 else()
-    set(LUMENMELODY_STANDALONE OFF)
+    set(LUMENA_STANDALONE OFF)
 endif()
 
-if(LUMENMELODY_STANDALONE AND NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+if(LUMENA_STANDALONE AND NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
-option(LUMENMELODY_BUILD_TESTS "Build the LumenMelody unit tests" ${LUMENMELODY_STANDALONE})
+option(LUMENA_BUILD_TESTS "Build the Lumena unit tests" ${LUMENA_STANDALONE})
 
 # --------------------------------------------------------------------------
 # Dependencies: nlohmann/json (via FetchContent)
@@ -51,8 +51,8 @@ FetchContent_MakeAvailable(nlohmann_json)
 # --------------------------------------------------------------------------
 # Library target
 # --------------------------------------------------------------------------
-add_library(LumenMelody STATIC
-    src/LumenMelody.cpp
+add_library(Lumena STATIC
+    src/Lumena.cpp
     src/image/ImageGrid.cpp
     src/image/BrightnessSampler.cpp
     src/scales/Scale.cpp
@@ -60,33 +60,33 @@ add_library(LumenMelody STATIC
     src/markov/MarkovChain.cpp
     src/midi/MidiSequence.cpp)
 
-add_library(LumenMelody::LumenMelody ALIAS LumenMelody)
+add_library(Lumena::Lumena ALIAS Lumena)
 
-target_include_directories(LumenMelody
+target_include_directories(Lumena
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
         $<INSTALL_INTERFACE:include>)
 
-target_link_libraries(LumenMelody
+target_link_libraries(Lumena
     PUBLIC
         nlohmann_json::nlohmann_json)
 
-target_compile_features(LumenMelody PUBLIC cxx_std_17)
+target_compile_features(Lumena PUBLIC cxx_std_17)
 
-target_compile_definitions(LumenMelody
+target_compile_definitions(Lumena
     PUBLIC
-        LUMENMELODY_VERSION="${PROJECT_VERSION}")
+        LUMENA_VERSION="${PROJECT_VERSION}")
 
 if(MSVC)
-    target_compile_options(LumenMelody PRIVATE /W4)
+    target_compile_options(Lumena PRIVATE /W4)
 else()
-    target_compile_options(LumenMelody PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(Lumena PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 # --------------------------------------------------------------------------
 # Tests
 # --------------------------------------------------------------------------
-if(LUMENMELODY_BUILD_TESTS)
+if(LUMENA_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()

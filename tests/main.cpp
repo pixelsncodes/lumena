@@ -1,4 +1,4 @@
-// LumenMelody test runner.
+// Lumena test runner.
 //
 // A dependency-free micro test harness: it exercises the skeleton types across
 // every module so that (a) the library links, and (b) the nlohmann/json
@@ -12,7 +12,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "LumenMelody.h"
+#include "Lumena.h"
 #include "image/BrightnessSampler.h"
 #include "image/ImageGrid.h"
 #include "markov/MarkovChain.h"
@@ -81,7 +81,7 @@ void test_midi() {
 // Proves the nlohmann/json dependency is fetched, linked and usable, and that
 // the bundled config is valid JSON with the expected shape.
 void test_json_config() {
-    const std::string path = std::string(LUMENMELODY_CONFIG_DIR) + "/scales.json";
+    const std::string path = std::string(LUMENA_CONFIG_DIR) + "/scales.json";
     std::ifstream file(path);
     CHECK(file.is_open());
     if (!file.is_open()) {
@@ -108,7 +108,7 @@ void test_json_config() {
 } // namespace
 
 int main() {
-    std::printf("LumenMelody test runner (library v%s)\n", lumen::version().c_str());
+    std::printf("Lumena test runner (library v%s)\n", lumen::version().c_str());
     std::printf("----------------------------------------\n");
 
     test_version();

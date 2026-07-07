@@ -2,10 +2,10 @@
 
 #include <string>
 
-/// \file LumenMelody.h
-/// Umbrella header for the LumenMelody core library.
+/// \file Lumena.h
+/// Umbrella header for the Lumena core library.
 ///
-/// LumenMelody turns an image into a MIDI melody. The pipeline is split into
+/// Lumena turns an image into a MIDI melody. The pipeline is split into
 /// four stages, each living in its own subdirectory under src/:
 ///   - image/  : overlay a grid on an image and sample per-cell brightness
 ///   - scales/ : manage musical scales, loaded from JSON config

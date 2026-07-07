@@ -1,7 +1,7 @@
-# LumenMelody
+# Lumena
 
 Core C++ library that turns an image into a MIDI melody. Built as a static
-library (`LumenMelody`) intended to be embedded into a JUCE-based synth plugin.
+library (`Lumena`) intended to be embedded into a JUCE-based synth plugin.
 
 > Status: **skeleton**. The build system, module structure, dependency wiring
 > and a test runner are in place. Feature logic is not implemented yet — each
@@ -42,7 +42,7 @@ ctest --test-dir build --output-on-failure
 Or run the test binary directly:
 
 ```sh
-./build/bin/LumenMelodyTests
+./build/bin/LumenaTests
 ```
 
 ## Embedding in the JUCE plugin
@@ -51,9 +51,9 @@ Add this repository as a subdirectory of the plugin's CMake build and link the
 target:
 
 ```cmake
-add_subdirectory(external/LumenMelody)
-target_link_libraries(MyPlugin PRIVATE LumenMelody::LumenMelody)
+add_subdirectory(external/lumena)
+target_link_libraries(MyPlugin PRIVATE Lumena::Lumena)
 ```
 
 When used as a subproject, the tests are disabled by default
-(`LUMENMELODY_BUILD_TESTS=OFF`).
+(`LUMENA_BUILD_TESTS=OFF`).
