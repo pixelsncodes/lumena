@@ -21,6 +21,8 @@ constexpr double kGrayscaleFloor = 0.05;  // below this, hue is unreliable.
 constexpr double kWashedOutSaturation = 0.22;  // below -> pentatonic
 constexpr double kVividSaturation = 0.70;       // above -> blues/harmonic minor
 constexpr double kBrightPentatonic = 0.5;       // washed-out major vs minor pent
+// These luma thresholds are in normalized [0,1] Rec.709-luma space (see
+// luma709 / ColorAnalysis); retuning against 709 is deferred to Phase 4.
 constexpr double kHarmonicMinorLuma = 0.18;     // vivid + very dark
 constexpr double kBluesLuma = 0.42;             // vivid + dark
 

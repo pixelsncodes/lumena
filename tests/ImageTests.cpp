@@ -8,13 +8,36 @@
 
 #include "image/BrightnessGrid.h"
 #include "image/Image.h"
+#include "image/Luma.h"
 #include "test_util.h"
 
 namespace {
 
 using lumena::image::BrightnessGrid;
 using lumena::image::Image;
+using lumena::image::luma709;
 using lumena::image::Normalization;
+
+// ---- luma709 helper (single-source Rec.709 luma) ---------------------------
+// Compile-time verification: luma709 is constexpr, so the compiler proves these.
+// Output is on the same 0..255 scale as the inputs. Coefficients sum to 1.0, so
+// any equal-channel gray maps to itself (black->0, gray->gray, white->255).
+static_assert(luma709(0.0, 0.0, 0.0) == 0.0, "black -> 0");
+static_assert(luma709(255.0, 255.0, 255.0) > 254.99 &&
+                  luma709(255.0, 255.0, 255.0) < 255.01,
+              "white -> 255");
+static_assert(luma709(255.0, 0.0, 0.0) > 54.1 &&
+                  luma709(255.0, 0.0, 0.0) < 54.3,
+              "pure red -> ~54.2 (0.2126*255)");
+static_assert(luma709(0.0, 255.0, 0.0) > 182.3 &&
+                  luma709(0.0, 255.0, 0.0) < 182.5,
+              "pure green -> ~182.4 (0.7152*255)");
+static_assert(luma709(0.0, 0.0, 255.0) > 18.3 &&
+                  luma709(0.0, 0.0, 255.0) < 18.5,
+              "pure blue -> ~18.4 (0.0722*255)");
+static_assert(luma709(128.0, 128.0, 128.0) > 127.99 &&
+                  luma709(128.0, 128.0, 128.0) < 128.01,
+              "mid-gray -> 128");
 
 // ---- Fixture generators ----------------------------------------------------
 
@@ -99,6 +122,23 @@ void test_image_load_failures() {
     CHECK(!Image::loadFromEncoded(nullptr, 0).has_value());
     const std::vector<std::uint8_t> junk{1, 2, 3, 4, 5, 6, 7, 8};
     CHECK(!Image::loadFromEncoded(junk.data(), junk.size()).has_value());
+}
+
+void test_luma709() {
+    // Known-input runtime checks for the single-source Rec.709 helper, on the
+    // 0..255 scale. Mirrors the compile-time static_asserts above with visible
+    // pass/fail output. Also exercises the pixel overload.
+    CHECK_APPROX(static_cast<float>(luma709(0.0, 0.0, 0.0)), 0.0f);
+    CHECK_APPROX(static_cast<float>(luma709(255.0, 255.0, 255.0)), 255.0f);
+    CHECK_APPROX(static_cast<float>(luma709(255.0, 0.0, 0.0)), 54.213f);
+    CHECK_APPROX(static_cast<float>(luma709(0.0, 255.0, 0.0)), 182.376f);
+    CHECK_APPROX(static_cast<float>(luma709(0.0, 0.0, 255.0)), 18.411f);
+    CHECK_APPROX(static_cast<float>(luma709(128.0, 128.0, 128.0)), 128.0f);
+
+    // Pixel overload agrees with the scalar form.
+    const lumena::image::Rgba px{255, 0, 0, 255};
+    CHECK_APPROX(static_cast<float>(luma709(px)),
+                 static_cast<float>(luma709(255.0, 0.0, 0.0)));
 }
 
 void test_luminance_coefficients() {
@@ -249,6 +289,7 @@ void test_empty_image_grid() {
 void run_image_tests() {
     test_image_raw_buffer_and_access();
     test_image_load_failures();
+    test_luma709();
     test_luminance_coefficients();
     test_all_black();
     test_all_white();
