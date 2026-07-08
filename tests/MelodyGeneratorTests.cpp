@@ -2,6 +2,7 @@
 // coherence via the grid random walk + low brightness bias), brightness-driven
 // velocity written into the MIDI byte stream, and Flowing/Straight rhythm.
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <random>
@@ -1034,9 +1035,39 @@ void test_mutate_respects_locks() {
     CHECK(anyPitchChange);
 }
 
+// Mirrors the strong-beat predicate at MelodyGenerator.cpp:537: a beat position
+// is strong iff it lands exactly on an integer beat on the tick grid. Verifies
+// the integer test classifies integer beats as strong and half-beats as weak on
+// the dyadic grid that current rhythm templates produce (multiples of 0.5).
+void test_strong_beat_tick_grid() {
+    constexpr long kTicksPerBeat = 960;  // must match MelodyGenerator.cpp
+    auto isStrong = [](double localBeat) {
+        const long tick = std::lround(localBeat * kTicksPerBeat);
+        return (tick % kTicksPerBeat) == 0;
+    };
+
+    // Integer beats -> strong.
+    for (double beat : {0.0, 1.0, 2.0, 3.0, 4.0})
+        CHECK(isStrong(beat));
+
+    // Half-beats (off-beats) -> weak.
+    for (double beat : {0.5, 1.5, 2.5, 3.5})
+        CHECK(!isStrong(beat));
+
+    // Agrees with the old float test on the dyadic (0.5-multiple) grid: sweep
+    // every half-beat from 0 to 8 and confirm identical classification.
+    for (int half = 0; half <= 16; ++half) {
+        const double beat = 0.5 * half;
+        const bool oldStrong =
+            std::fabs(beat - std::round(beat)) < 1e-3;
+        CHECK(isStrong(beat) == oldStrong);
+    }
+}
+
 }  // namespace
 
 void run_melody_generator_tests() {
+    test_strong_beat_tick_grid();
     test_random_walk_is_smooth();
     test_velocity_mapping_in_bytes();
     test_rhythm_modes();

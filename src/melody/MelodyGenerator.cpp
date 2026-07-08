@@ -50,6 +50,11 @@ constexpr float kPhraseEndBias = 0.85f;
 constexpr double kCadenceBeats = 2.0;
 // Cells at least this bright are preferred as arpeggio ornament sites.
 constexpr float kArpeggioBrightness = 0.7f;
+// Tick resolution for strong-beat detection: beat positions are quantised to an
+// integer tick grid so the on-beat test is exact integer arithmetic, not a
+// float epsilon compare. 960 PPQ divides all current durations (multiples of
+// 0.5 -> 480 ticks) cleanly.
+constexpr long kTicksPerBeat = 960;
 
 // ---- phrase-dynamics (contour) constants ------------------------------------
 
@@ -534,7 +539,13 @@ private:
         const float gradient = brightness - prevBright;
         const double energy = clampUnit(options_.energy);
         const double complexity = clampUnit(options_.arpeggioAmount);
-        const bool strong = std::fabs(localBeat_ - std::round(localBeat_)) < 1e-3;
+        // Strong-beat = every integer beat, on an exact tick grid (was a fragile
+        // float epsilon compare). Classification is unchanged. NOTE: `strong` is
+        // still phrase-relative via localBeat_ (resets each phrase) — making it
+        // bar-relative and reconciling the localBeat_/harmonyBeat_ clocks is
+        // deferred to bug 4.
+        const long tick = std::lround(localBeat_ * kTicksPerBeat);
+        const bool strong = (tick % kTicksPerBeat) == 0;
 
         // Advance the harmony to the chord for the current bar, so strong-beat
         // chord-tone targeting outlines the moving progression, not a fixed tonic.
