@@ -218,7 +218,7 @@ int main(int argc, char** argv) {
         }
         std::fprintf(csv,
                      "index,pitch,startBeat,durationBeats,velocity,degree,"
-                     "source_brightness\n");
+                     "source_brightness,chord_tone\n");
         for (std::size_t i = 0; i < notes.size(); ++i) {
             const Note& n = notes[i];
             const int degree =
@@ -230,9 +230,13 @@ int main(int argc, char** argv) {
                 const auto& cell = melody.cells[i];
                 srcBrightness = grid.valueAt(cell.col, cell.row);
             }
-            std::fprintf(csv, "%zu,%d,%.6f,%.6f,%d,%d,%.6f\n", i, n.noteNumber,
-                         n.startBeats, n.lengthBeats, n.velocity, degree,
-                         srcBrightness);
+            // Chord-tone role (0=root,1=third,...); -1 for melodic notes, which
+            // do not populate the chordTones track.
+            const int chordTone =
+                i < melody.chordTones.size() ? melody.chordTones[i] : -1;
+            std::fprintf(csv, "%zu,%d,%.6f,%.6f,%d,%d,%.6f,%d\n", i,
+                         n.noteNumber, n.startBeats, n.lengthBeats, n.velocity,
+                         degree, srcBrightness, chordTone);
         }
         std::fclose(csv);
         std::printf("Wrote notes CSV: %s (%zu rows)\n",

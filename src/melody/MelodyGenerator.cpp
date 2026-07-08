@@ -938,6 +938,21 @@ std::vector<int> diatonicChord(int tonicPc, bool major, int deg, int size,
     return notes;
 }
 
+// The chord-tone role (0 = root, 1 = third, 2 = fifth, ...) of a voiced MIDI
+// note, found by matching its pitch class against the chord's tones. A triad's
+// tones are distinct pitch classes, so this is robust to inversion and octave
+// shifts (voice-leading and the arp's octave jumps only move notes by octaves).
+// Falls back to 0 if nothing matches (should not happen for a real chord tone).
+int chordToneRole(int note, const std::vector<int>& chordPitches) {
+    const int pc = ((note % 12) + 12) % 12;
+    for (std::size_t k = 0; k < chordPitches.size(); ++k) {
+        if ((((chordPitches[k] % 12) + 12) % 12) == pc) {
+            return static_cast<int>(k);
+        }
+    }
+    return 0;
+}
+
 // Named diatonic pop progressions over the I/IV/V/vi family (scale degrees:
 // 0 = I, 3 = IV, 4 = V, 5 = vi). Each is a self-contained four-chord loop that
 // resolves when tiled, so no separate V–I forcing is needed. Shared by the
@@ -1023,10 +1038,12 @@ Melody generateArpeggiated(const BrightnessGrid& grid, const Scale& scale,
 
     melody.notes.reserve(static_cast<std::size_t>(length));
     melody.degrees.reserve(static_cast<std::size_t>(length));
+    melody.chordTones.reserve(static_cast<std::size_t>(length));
     melody.cells.reserve(static_cast<std::size_t>(length));
 
     int currentBar = -1;
-    std::vector<int> cycle;  // this bar's chord tones, ordered by pattern
+    std::vector<int> cycle;     // this bar's chord tones, ordered by pattern
+    std::vector<int> barChord;  // this bar's canonical chord tones, for role lookup
     double beat = 0.0;
     for (int i = 0; i < length; ++i) {
         if (options.cellPath == CellPath::PureRandom) {
@@ -1049,6 +1066,8 @@ Melody generateArpeggiated(const BrightnessGrid& grid, const Scale& scale,
                                            kHarmonyBaseMidi + 12 * o))
                     asc.push_back(n);
             cycle = orderChord(asc, options.arpPattern);
+            barChord = diatonicChord(tonicPc, major, roots[bar], 3,
+                                     kHarmonyBaseMidi);
         }
 
         const int within = i % notesPerBar;
@@ -1090,8 +1109,14 @@ Melody generateArpeggiated(const BrightnessGrid& grid, const Scale& scale,
         note.startBeats = start;
         note.lengthBeats = len * gate;
 
+        // Degree metadata: arp notes are chord tones, not melodic-scale degrees,
+        // so `degrees` is the -1 sentinel and the chord-tone role (robust to the
+        // octave jump above and the pattern ordering) carries the identity. No
+        // pitch is touched — metadata only.
+        const int role = chordToneRole(arpNote, barChord);
         melody.notes.push_back(note);
-        melody.degrees.push_back(0);
+        melody.degrees.push_back(-1);
+        melody.chordTones.push_back(role);
         melody.cells.push_back(GridCell{col, row});
         beat += rate;
     }
@@ -1170,9 +1195,12 @@ Melody generateChords(const BrightnessGrid& grid, const Scale& scale,
                        + (downBeat ? 8 : 0);
         velocity = applyEnergy(velocity, options.energy);
 
-        std::vector<int> notes =
-            voiceLead(diatonicChord(tonicPc, major, roots[c], size, kHarmonyBaseMidi),
-                      prevTop);
+        // Canonical (stacked) chord tones, kept for chord-tone role lookup: the
+        // voice-led copy sorts by pitch, so `v` no longer identifies the root/
+        // third/fifth once an inversion is chosen.
+        const std::vector<int> chordPitches =
+            diatonicChord(tonicPc, major, roots[c], size, kHarmonyBaseMidi);
+        std::vector<int> notes = voiceLead(chordPitches, prevTop);
         prevTop = *std::max_element(notes.begin(), notes.end());
 
         for (std::size_t v = 0; v < notes.size(); ++v) {
@@ -1183,8 +1211,14 @@ Melody generateChords(const BrightnessGrid& grid, const Scale& scale,
                                 : velocity;
             note.startBeats = beat;
             note.lengthBeats = rate;
+            // Degree metadata: chord notes are not melodic-scale degrees, so
+            // `degrees` is the -1 sentinel; the chord-tone role (by pitch class,
+            // correct after inversion) carries the identity. Metadata only; the
+            // voiced pitch above is unchanged.
+            const int role = chordToneRole(notes[v], chordPitches);
             melody.notes.push_back(note);
-            melody.degrees.push_back(roots[c] + 2 * static_cast<int>(v));
+            melody.degrees.push_back(-1);
+            melody.chordTones.push_back(role);
             melody.cells.push_back(GridCell{col, row});
         }
         beat += rate;

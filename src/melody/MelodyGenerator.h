@@ -174,7 +174,21 @@ struct GridCell {
 /// melodic intervals in scale steps without inverting the note mapping.
 struct Melody {
     std::vector<midi::Note> notes;
+
+    /// The scale degree each note occupies, in parallel with `notes`.
+    /// - Melody/Freeform/Phrased: the extended index into the melodic `scale`,
+    ///   satisfying `scale.noteAt(degrees[i], octaveSpan) == notes[i].noteNumber`.
+    /// - Arp/Chord: `-1`, meaning "not a Melody-scale degree" — these notes are
+    ///   voiced from the key's diatonic triads, not the melodic scale, so there
+    ///   is no valid index here; their identity lives in `chordTones`. Consumers
+    ///   that map a degree back through `scale.noteAt` must skip the sentinel.
     std::vector<int> degrees;
+
+    /// Chord-tone role of each note (0 = root, 1 = third, 2 = fifth, ...), in
+    /// parallel with `notes`. Populated only in Arp/Chord modes; empty in the
+    /// melodic modes (where notes are not chord tones). Kept as a separate track
+    /// rather than overloading `degrees`, so `degrees` keeps a single meaning.
+    std::vector<int> chordTones;
 
     /// The source grid cell for each note, in parallel with `notes` (so
     /// `cells.size() == notes.size()`). A note produced by transposing a motif
