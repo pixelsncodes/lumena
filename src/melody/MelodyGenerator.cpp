@@ -120,6 +120,16 @@ double flowingDuration(float brightness, std::mt19937& rng) {
 
 namespace {
 
+// Semitone offsets of the major and natural-minor scales from the tonic. Used
+// both by the phrased melody's per-bar harmonic target and by the chord/arp
+// generators to spell real triads in the key's parent major/minor.
+constexpr int kMajorSteps[7] = {0, 2, 4, 5, 7, 9, 11};
+constexpr int kMinorSteps[7] = {0, 2, 3, 5, 7, 8, 10};
+
+// A session-locked named pop progression (I/IV/V/vi), tiled to `count` chords.
+// Defined below; forward-declared so the phrased melody can target it too.
+std::vector<int> progressionRoots(int count, std::mt19937& rng);
+
 // The original flat walk: a single continuous theory-weighted Markov walk,
 // steered by grid brightness. Kept byte-for-byte so a fixed seed reproduces the
 // pre-phrase-structure behaviour.
@@ -233,6 +243,34 @@ public:
         chordPcs_[0] = tonicPc;
         chordPcs_[1] = (tonicPc + third) % 12;
         chordPcs_[2] = (tonicPc + 7) % 12;
+
+        // Harmonic backbone: the melody now outlines a moving chord progression
+        // (the same named pop templates the arp/chords use) rather than pulling
+        // toward a single static tonic triad. `progMajor_` picks the parent
+        // major/minor the triads are spelled from — see scaleIsMajor().
+        tonicPc_ = tonicPc;
+        progMajor_ = hasM3 && ! hasm3;
+        beatsPerBar_ = options.beatsPerBar > 0.0 ? options.beatsPerBar : 4.0;
+        progression_ = progressionRoots(4, rng);
+        updateHarmonyTarget(0.0);  // start on the progression's first chord
+        pickRhythmTemplate();      // lock one groove for the session
+    }
+
+    // Rebuilds the strong-beat chord-tone target (chordPcs_) for the bar that
+    // `beat` falls in: one chord per bar, cycling through the session's
+    // progression. Triads are spelled from the parent major/minor so they are
+    // real chords even when the melodic scale is pentatonic.
+    void updateHarmonyTarget(double beat) {
+        if (progression_.empty()) return;
+        const int bars = static_cast<int>(beat / beatsPerBar_);
+        const int n = static_cast<int>(progression_.size());
+        const int idx = ((bars % n) + n) % n;
+        const int root = progression_[static_cast<std::size_t>(idx)];
+        const int* steps = progMajor_ ? kMajorSteps : kMinorSteps;
+        for (int k = 0; k < 3; ++k) {
+            const int deg = ((root + 2 * k) % 7 + 7) % 7;
+            chordPcs_[k] = ((tonicPc_ + steps[deg]) % 12 + 12) % 12;
+        }
     }
 
     // Builds a phrase of `count` notes by walking the grid. When `newRegion` is
@@ -498,6 +536,10 @@ private:
         const double complexity = clampUnit(options_.arpeggioAmount);
         const bool strong = std::fabs(localBeat_ - std::round(localBeat_)) < 1e-3;
 
+        // Advance the harmony to the chord for the current bar, so strong-beat
+        // chord-tone targeting outlines the moving progression, not a fixed tonic.
+        updateHarmonyTarget(harmonyBeat_);
+
         if (ending) {
             const int target = nearestDegreeWithPitchClass(
                 static_cast<int>(degree_), /*wantFifth=*/true);
@@ -543,6 +585,7 @@ private:
                                ? nextDuration()
                                : 1.0;
         localBeat_ += note.lengthBeats;
+        harmonyBeat_ += note.lengthBeats;  // accumulates across phrases
         return note;
     }
 
@@ -572,29 +615,48 @@ private:
         return clampDegree(from);
     }
 
-    // Next note length in beats, driven by Energy (denser/shorter) and
-    // Complexity (more variety), independent of brightness. Rhythm-first.
+    // Next note length in beats. The session picks one rhythm template up front
+    // (see pickRhythmTemplate) and the melody cycles through it, so the piece has
+    // a consistent rhythmic identity instead of re-rolling every note. The
+    // template's note density is chosen to match Energy, keeping the old
+    // "energetic = busier" feel. Returns a steady quarter if no template is set.
     double nextDuration() {
-        const double e = clampUnit(options_.energy);
-        const double cx = clampUnit(options_.arpeggioAmount);
-        // (duration, weight) — energy shifts weight toward short values, and
-        // complexity opens up dotted/syncopated lengths for variety.
-        const double durs[5] = {2.0, 1.0, 0.5, 0.25, 1.5};
-        const double wts[5]  = {
-            0.9 * (1.0 - e),        // half — calm
-            0.6,                    // quarter — always plausible
-            0.35 + 0.9 * e,         // eighth — driven by energy
-            0.7 * e * (0.5 + cx),   // sixteenth — energy + complexity
-            0.15 + 0.7 * cx         // dotted quarter — complexity/syncopation
+        if (rhythmTemplate_.empty()) return 1.0;
+        const double d = rhythmTemplate_[rhythmCursor_ % rhythmTemplate_.size()];
+        ++rhythmCursor_;
+        return d;
+    }
+
+    // Chooses one one-bar rhythm template for the whole session, weighted so
+    // higher Energy favours busier grooves. Each template's durations sum to a
+    // bar (beatsPerBar_), so cycling it tiles cleanly.
+    void pickRhythmTemplate() {
+        struct RhythmTemplate { std::vector<double> beats; };
+        static const std::vector<RhythmTemplate> kTemplates = {
+            {{2.0, 1.0, 1.0}},                        // half + two quarters (3)
+            {{1.0, 1.0, 1.0, 1.0}},                   // steady quarters      (4)
+            {{1.5, 0.5, 1.0, 1.0}},                   // charleston           (4)
+            {{1.5, 0.5, 1.5, 0.5}},                   // dotted swing         (4)
+            {{1.0, 0.5, 0.5, 1.0, 1.0}},              // rock eighths         (5)
+            {{0.5, 1.0, 0.5, 1.0, 1.0}},              // off-beat push        (5)
+            {{1.0, 0.5, 0.5, 1.0, 0.5, 0.5}},         // gallop               (6)
+            {{0.5, 0.5, 0.5, 0.5, 1.0, 1.0}},         // driving sixteenths   (6)
         };
-        double total = 0.0;
-        for (double w : wts) total += (w > 0.0 ? w : 0.0);
-        double r = uni01() * total, acc = 0.0;
-        for (int i = 0; i < 5; ++i) {
-            acc += (wts[i] > 0.0 ? wts[i] : 0.0);
-            if (r <= acc) return durs[i];
+        const double e = clampUnit(options_.energy);
+        std::vector<double> weights;
+        weights.reserve(kTemplates.size());
+        for (const RhythmTemplate& t : kTemplates) {
+            // Density normalised to ~[0,1]: 3 notes/bar -> 0, 6 notes/bar -> 1.
+            const double dn = (static_cast<double>(t.beats.size()) - 3.0) / 3.0;
+            // Match is highest when the template's density tracks Energy; cubed
+            // to sharpen the bias (energetic sessions clearly favour busier
+            // grooves), with a small floor so nothing is ever impossible.
+            const double match = e * dn + (1.0 - e) * (1.0 - dn);
+            weights.push_back(0.04 + match * match * match);
         }
-        return 1.0;
+        std::discrete_distribution<std::size_t> pick(weights.begin(), weights.end());
+        rhythmTemplate_ = kTemplates[pick(rng_)].beats;
+        rhythmCursor_ = 0;
     }
 
     // The pitch class (semitones above the root, mod octave) of a scale degree.
@@ -633,7 +695,17 @@ private:
     int row_;
     std::size_t degree_;
     double localBeat_ = 0.0;  // beats elapsed since the current phrase began
-    int chordPcs_[3] = {0, 4, 7};  // tonic-triad pitch classes (strong-beat targets)
+    int chordPcs_[3] = {0, 4, 7};  // current-chord pitch classes (strong-beat targets)
+    // Harmonic backbone shared with the arp/chords: a session-locked progression
+    // the melody outlines, one chord per bar, tracked by a running beat count.
+    std::vector<int> progression_;
+    int tonicPc_ = 0;
+    bool progMajor_ = false;
+    double beatsPerBar_ = 4.0;
+    double harmonyBeat_ = 0.0;  // beats elapsed across the whole melody
+    // Session-locked rhythm: one one-bar groove the melody cycles through.
+    std::vector<double> rhythmTemplate_;
+    std::size_t rhythmCursor_ = 0;
 };
 
 // Builds a structured, phrased melody: motif (A), varied repeat (A'),
@@ -832,10 +904,6 @@ void enforceVariety(Melody& melody, const Scale& scale,
 
 
 
-// Semitone offsets of the major and natural-minor scales from the tonic.
-constexpr int kMajorSteps[7] = {0, 2, 4, 5, 7, 9, 11};
-constexpr int kMinorSteps[7] = {0, 2, 3, 5, 7, 8, 10};
-
 // A scale is treated as major-flavoured when it has a major third above the
 // tonic and no minor third (Ionian/Lydian/Mixolydian/major pentatonic);
 // everything else (Aeolian/Dorian/Phrygian/blues/minor pentatonic) is minor.
@@ -870,20 +938,39 @@ std::vector<int> diatonicChord(int tonicPc, bool major, int deg, int size,
     return notes;
 }
 
-// A short diatonic chord progression as degrees (0..6): mostly falling thirds
-// and rising steps, resolving home to the tonic every fourth chord so a loop
-// wraps cleanly. Shared by the arpeggiator and the block-chord generator.
-std::vector<int> chordRootWalk(int count, std::mt19937& rng) {
-    const int motions[] = {-2, 1, -3, 3, -1};
-    const double w[] = {0.32, 0.26, 0.18, 0.12, 0.12};
-    std::discrete_distribution<int> md(std::begin(w), std::end(w));
+// Named diatonic pop progressions over the I/IV/V/vi family (scale degrees:
+// 0 = I, 3 = IV, 4 = V, 5 = vi). Each is a self-contained four-chord loop that
+// resolves when tiled, so no separate V–I forcing is needed. Shared by the
+// melody's harmonic targeting, the arpeggiator, and the block-chord generator.
+struct ProgressionTemplate {
+    const char* name;
+    int degrees[4];  // one chord per bar
+};
+
+const std::vector<ProgressionTemplate>& progressionTemplates() {
+    static const std::vector<ProgressionTemplate> kTemplates = {
+        {"I-V-vi-IV", {0, 4, 5, 3}},   // the "four-chord song"
+        {"vi-IV-I-V", {5, 3, 0, 4}},   // relative-minor pop loop
+        {"I-vi-IV-V", {0, 5, 3, 4}},   // 50s doo-wop
+        {"I-IV-vi-V", {0, 3, 5, 4}},
+        {"I-IV-V-vi", {0, 3, 4, 5}},   // rising, deceptive turnaround
+        {"vi-IV-V-I", {5, 3, 4, 0}},   // resolves home on the downbeat
+    };
+    return kTemplates;
+}
+
+// Picks one progression for the whole session and tiles it to `count` chords.
+// Session-locked: a fixed seed selects the same template every time, so the
+// harmony has a stable identity rather than a fresh random walk each bar.
+std::vector<int> progressionRoots(int count, std::mt19937& rng) {
+    const auto& templates = progressionTemplates();
+    std::uniform_int_distribution<std::size_t> pick(0, templates.size() - 1);
+    const int* prog = templates[pick(rng)].degrees;
     const int n = std::max(1, count);
     std::vector<int> roots;
     roots.reserve(static_cast<std::size_t>(n));
-    int root = 0;
     for (int c = 0; c < n; ++c) {
-        if (c > 0) root = (c % 4 == 0) ? 0 : root + motions[md(rng)];
-        roots.push_back(((root % 7) + 7) % 7);
+        roots.push_back(prog[c % 4]);
     }
     return roots;
 }
@@ -924,7 +1011,7 @@ Melody generateArpeggiated(const BrightnessGrid& grid, const Scale& scale,
     }
 
     // One chord per bar.
-    const std::vector<int> roots = chordRootWalk(bars, rng);
+    const std::vector<int> roots = progressionRoots(bars, rng);
 
     const int cols = grid.columns();
     const int rows = grid.rows();
@@ -1013,7 +1100,7 @@ Melody generateArpeggiated(const BrightnessGrid& grid, const Scale& scale,
 
 // ---- chords -----------------------------------------------------------------
 
-// A chord progression: a diatonic root walk resolving with a V–I cadence, each
+// A chord progression: a session-locked named pop template (I/IV/V/vi), each
 // chord voiced by inversion for smooth voice-leading (the top voice moves as
 // little as possible), one chord per bar — two per bar when Energy is high.
 // Brightness and Energy set velocity and accent the downbeat of each bar.
@@ -1043,9 +1130,9 @@ Melody generateChords(const BrightnessGrid& grid, const Scale& scale,
     std::uniform_int_distribution<int> stepDist(0, 7);
 
     // Progression, then impose a V–I cadence at the end so the loop resolves.
-    std::vector<int> roots = chordRootWalk(chords, rng);
-    if (! roots.empty()) roots.back() = 0;                 // I (home)
-    if (roots.size() >= 2) roots[roots.size() - 2] = 4;    // V before I
+    // A named pop progression, session-locked and tiled to fill the bars. The
+    // template is a self-resolving loop, so no separate V–I is imposed here.
+    std::vector<int> roots = progressionRoots(chords, rng);
 
     // Smooth voice-leading: choose the inversion whose top note is closest to the
     // previous chord's top note.
