@@ -596,9 +596,15 @@ private:
                 next = nearestChordToneDegree(next);
                 didSnap = true;  // diagnostics only (bug-4 hook)
             }
-            // Anti-stuck: never sit on the same degree twice running.
+            // Anti-stuck: never sit on the same degree twice running. The coin is
+            // drawn UNCONDITIONALLY (like the snap coin in 4a-0), so the RNG
+            // stream no longer depends on whether this branch fires. Required
+            // before 4a: the clock fix changes snapped degrees, which changes
+            // `next`, which would otherwise flip this short-circuit and perturb
+            // the draw sequence. 4a-0b: RNG-ordering churn only, no logic change.
+            const double antiStuckCoin = uni01();
             if (next == static_cast<int>(degree_)) {
-                next = clampDegree(next + (uni01() < 0.5 ? -1 : 1));
+                next = clampDegree(next + (antiStuckCoin < 0.5 ? -1 : 1));
             }
             degree_ = static_cast<std::size_t>(next);
         }
