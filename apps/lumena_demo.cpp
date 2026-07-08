@@ -5,7 +5,7 @@
 //   lumena_demo <image> [--out melody.mid] [--seed N] [--tempo BPM]
 //                       [--rhythm straight|flowing] [--length N]
 //                       [--cells walk|random] [--mode phrased|freeform]
-//                       [--arp 0..1]
+//                       [--arp 0..1] [--dump-notes notes.csv]
 //
 // It runs the full standalone pipeline end to end — image -> brightness grid ->
 // circle-of-fifths key -> theory-weighted Markov walk -> MIDI notes — so it
@@ -46,6 +46,7 @@ using lumena::scales::KeySelector;
 struct Options {
     std::string   imagePath;
     std::string   outPath;      // empty -> do not write a file
+    std::string   dumpNotesPath;  // empty -> do not write a CSV of the notes
     unsigned      seed  = 20260707u;
     double        tempo = 120.0;
     MelodyOptions melody;       // rhythm/cells/length/bias default to musical values
@@ -53,7 +54,8 @@ struct Options {
 
 void printUsage(const char* argv0) {
     std::fprintf(stderr,
-                 "Usage: %s <image> [--out melody.mid] [--seed N] [--tempo BPM]\n"
+                 "Usage: %s <image> [--out melody.mid] [--dump-notes notes.csv]\n"
+                 "          [--seed N] [--tempo BPM]\n"
                  "          [--rhythm straight|flowing] [--length N] "
                  "[--cells walk|random]\n"
                  "          [--mode phrased|freeform]\n"
@@ -70,6 +72,8 @@ bool parseArgs(int argc, char** argv, Options& opts) {
         const std::string arg = argv[i];
         if (arg == "--out" && i + 1 < argc) {
             opts.outPath = argv[++i];
+        } else if (arg == "--dump-notes" && i + 1 < argc) {
+            opts.dumpNotesPath = argv[++i];
         } else if (arg == "--seed" && i + 1 < argc) {
             opts.seed = static_cast<unsigned>(std::strtoul(argv[++i], nullptr, 10));
         } else if (arg == "--tempo" && i + 1 < argc) {
@@ -201,6 +205,39 @@ int main(int argc, char** argv) {
                 opts.melody.loopBars > 0 ? ", looped" : "",
                 opts.melody.rhythm == RhythmMode::Flowing ? "flowing" : "straight",
                 opts.melody.cellPath == CellPath::RandomWalk ? "walk" : "random");
+
+    // Demo-only diagnostics: dump the raw generated notes as CSV so external
+    // tooling can measure how the melody varies across seeds and images. This
+    // reads the already-generated Melody and does not touch generation.
+    if (!opts.dumpNotesPath.empty()) {
+        std::FILE* csv = std::fopen(opts.dumpNotesPath.c_str(), "wb");
+        if (!csv) {
+            std::fprintf(stderr, "Failed to open CSV file for writing: %s\n",
+                         opts.dumpNotesPath.c_str());
+            return 1;
+        }
+        std::fprintf(csv,
+                     "index,pitch,startBeat,durationBeats,velocity,degree,"
+                     "source_brightness\n");
+        for (std::size_t i = 0; i < notes.size(); ++i) {
+            const Note& n = notes[i];
+            const int degree =
+                i < melody.degrees.size() ? melody.degrees[i] : -1;
+            // Source-cell brightness for the note's provenance cell, read back
+            // from the same grid the generator used. -1 flags a missing cell.
+            double srcBrightness = -1.0;
+            if (i < melody.cells.size()) {
+                const auto& cell = melody.cells[i];
+                srcBrightness = grid.valueAt(cell.col, cell.row);
+            }
+            std::fprintf(csv, "%zu,%d,%.6f,%.6f,%d,%d,%.6f\n", i, n.noteNumber,
+                         n.startBeats, n.lengthBeats, n.velocity, degree,
+                         srcBrightness);
+        }
+        std::fclose(csv);
+        std::printf("Wrote notes CSV: %s (%zu rows)\n",
+                    opts.dumpNotesPath.c_str(), notes.size());
+    }
 
     const MidiSequence sequence(notes, opts.tempo, MidiSequence::kDefaultPpq);
 
