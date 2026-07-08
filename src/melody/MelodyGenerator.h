@@ -202,6 +202,18 @@ struct Melody {
     /// callers reason about phrase boundaries — e.g. the rests between them or
     /// where a motif repeats.
     std::vector<std::size_t> phraseStarts;
+
+    /// Diagnostics only (bug-4 measurement hook). Parallel with `notes` in
+    /// Phrased Melody mode; empty in every other mode. Never read by generation
+    /// or the MIDI path — they exist so a harness can score strong-beat and
+    /// chord-tone behaviour without reconstructing the engine's internal clocks.
+    /// - dbgStrong:    1 if the note fell on a strong beat when generated, else 0.
+    /// - dbgSnapped:   1 if stepNote snapped it to a chord tone (walked phrases
+    ///                 only; copied/varied phrases are 0), else 0.
+    /// - dbgChordRoot: the progression root degree the snap targeted, or -1.
+    std::vector<int> dbgStrong;
+    std::vector<int> dbgSnapped;
+    std::vector<int> dbgChordRoot;
 };
 
 /// Runs the full melody walk: a theory-weighted Markov chain over scale degrees,

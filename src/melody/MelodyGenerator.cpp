@@ -215,6 +215,15 @@ struct PhraseNote {
     // figure inherits its origin note's cell), so it survives into Melody::cells.
     int col = 0;
     int row = 0;
+
+    // ---- diagnostics only (bug-4 measurement hook) --------------------------
+    // Never read by generation or the MIDI path; propagated to Melody's debug
+    // tracks purely so the harness can score strong-beat / chord-tone behaviour.
+    // Set on notes produced by stepNote (walked phrases); copied/varied phrases
+    // clear them (they are not snapped in their new position).
+    bool dbgStrong = false;   ///< was this a strong beat when generated?
+    bool dbgSnapped = false;  ///< did stepNote snap it to a chord tone?
+    int dbgChordRoot = -1;    ///< progression root degree the snap targeted (-1 = none)
 };
 
 // State the phrase builder threads through generation: the grid walk position,
@@ -271,6 +280,7 @@ public:
         const int n = static_cast<int>(progression_.size());
         const int idx = ((bars % n) + n) % n;
         const int root = progression_[static_cast<std::size_t>(idx)];
+        curChordRoot_ = root;  // diagnostics only (bug-4 hook)
         const int* steps = progMajor_ ? kMajorSteps : kMinorSteps;
         for (int k = 0; k < 3; ++k) {
             const int deg = ((root + 2 * k) % 7 + 7) % 7;
@@ -551,6 +561,7 @@ private:
         // chord-tone targeting outlines the moving progression, not a fixed tonic.
         updateHarmonyTarget(harmonyBeat_);
 
+        bool didSnap = false;  // diagnostics only (bug-4 hook)
         if (ending) {
             const int target = nearestDegreeWithPitchClass(
                 static_cast<int>(degree_), /*wantFifth=*/true);
@@ -583,6 +594,7 @@ private:
             const double snapCoin = uni01();
             if (strong && snapCoin < 0.6) {
                 next = nearestChordToneDegree(next);
+                didSnap = true;  // diagnostics only (bug-4 hook)
             }
             // Anti-stuck: never sit on the same degree twice running.
             if (next == static_cast<int>(degree_)) {
@@ -600,6 +612,9 @@ private:
         note.brightness = brightness;
         note.col = col_;
         note.row = row_;
+        note.dbgStrong = strong;           // diagnostics only (bug-4 hook)
+        note.dbgSnapped = didSnap;         // diagnostics only
+        note.dbgChordRoot = curChordRoot_; // diagnostics only
         note.lengthBeats = (options_.rhythm == RhythmMode::Flowing)
                                ? nextDuration()
                                : 1.0;
@@ -715,6 +730,7 @@ private:
     std::size_t degree_;
     double localBeat_ = 0.0;  // beats elapsed since the current phrase began
     int chordPcs_[3] = {0, 4, 7};  // current-chord pitch classes (strong-beat targets)
+    int curChordRoot_ = 0;         // diagnostics only (bug-4 hook): last targeted root degree
     // Harmonic backbone shared with the arp/chords: a session-locked progression
     // the melody outlines, one chord per bar, tracked by a running beat count.
     std::vector<int> progression_;
@@ -769,6 +785,16 @@ Melody generatePhrased(const BrightnessGrid& grid, const Scale& scale,
             phrase = repeatCoin(rng) < options.repetition
                          ? motif
                          : builder.varyMotif(motif);  // A', A'', ...
+            // Diagnostics only (bug-4 hook): these notes are copied/transposed,
+            // not snapped in their new bar, so clear the inherited snap flags.
+            // Purely a debug-field reset — pitches/timing/RNG untouched. Indexed
+            // (not range-for) to avoid a GCC-15 -Wfree-nonheap-object false
+            // positive from inlining varyMotif's returned vector.
+            for (std::size_t k = 0; k < phrase.size(); ++k) {
+                phrase[k].dbgStrong = false;
+                phrase[k].dbgSnapped = false;
+                phrase[k].dbgChordRoot = -1;
+            }
         } else {
             phrase = builder.walkPhrase(motifLen, /*newRegion=*/true,
                                         /*tonicFifthEnding=*/true);  // B
@@ -813,6 +839,9 @@ Melody generatePhrased(const BrightnessGrid& grid, const Scale& scale,
             melody.notes.push_back(note);
             melody.degrees.push_back(pn.degree);
             melody.cells.push_back(GridCell{pn.col, pn.row});
+            melody.dbgStrong.push_back(pn.dbgStrong ? 1 : 0);       // diagnostics only
+            melody.dbgSnapped.push_back(pn.dbgSnapped ? 1 : 0);     // diagnostics only
+            melody.dbgChordRoot.push_back(pn.dbgChordRoot);         // diagnostics only
             beat += pn.lengthBeats;
         }
     }

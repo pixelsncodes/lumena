@@ -218,7 +218,11 @@ int main(int argc, char** argv) {
         }
         std::fprintf(csv,
                      "index,pitch,startBeat,durationBeats,velocity,degree,"
-                     "source_brightness,chord_tone\n");
+                     "source_brightness,chord_tone,"
+                     // Appended bug-4 diagnostic columns (Phrased Melody only;
+                     // -1/0 elsewhere). realStartBeat duplicates startBeat so the
+                     // snap-site metric is self-contained on the appended block.
+                     "realStartBeat,was_strong,was_snapped,target_chord_root\n");
         for (std::size_t i = 0; i < notes.size(); ++i) {
             const Note& n = notes[i];
             const int degree =
@@ -234,9 +238,17 @@ int main(int argc, char** argv) {
             // do not populate the chordTones track.
             const int chordTone =
                 i < melody.chordTones.size() ? melody.chordTones[i] : -1;
-            std::fprintf(csv, "%zu,%d,%.6f,%.6f,%d,%d,%.6f,%d\n", i,
+            // Bug-4 diagnostics: 0/-1 when the track is empty (non-Phrased modes).
+            const int wasStrong =
+                i < melody.dbgStrong.size() ? melody.dbgStrong[i] : 0;
+            const int wasSnapped =
+                i < melody.dbgSnapped.size() ? melody.dbgSnapped[i] : 0;
+            const int chordRoot =
+                i < melody.dbgChordRoot.size() ? melody.dbgChordRoot[i] : -1;
+            std::fprintf(csv, "%zu,%d,%.6f,%.6f,%d,%d,%.6f,%d,%.6f,%d,%d,%d\n", i,
                          n.noteNumber, n.startBeats, n.lengthBeats, n.velocity,
-                         degree, srcBrightness, chordTone);
+                         degree, srcBrightness, chordTone,
+                         n.startBeats, wasStrong, wasSnapped, chordRoot);
         }
         std::fclose(csv);
         std::printf("Wrote notes CSV: %s (%zu rows)\n",
