@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include "image/Luma.h"
+
 namespace lumena::image {
 
 namespace {
@@ -18,9 +20,7 @@ int clampResolution(int requested) {
 
 // Rec. 709 perceived luminance for an 8-bit pixel, in the 0..255 range.
 double perceivedLuminance(const Rgba& px) {
-    return 0.2126 * static_cast<double>(px.r) +
-           0.7152 * static_cast<double>(px.g) +
-           0.0722 * static_cast<double>(px.b);
+    return luma709(px);
 }
 
 // Maps cell index `i` of `divisions` onto the pixel span [begin, end) of an

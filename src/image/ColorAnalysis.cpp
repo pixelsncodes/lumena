@@ -4,6 +4,7 @@
 #include <cmath>
 
 #include "image/Image.h"
+#include "image/Luma.h"
 
 namespace lumena::image {
 
@@ -69,10 +70,11 @@ ColorSummary averageHueSaturation(const Image& image) noexcept {
             sumCos += hsv.s * std::cos(radians);
             sumSaturation += hsv.s;
 
-            // Perceptual brightness (Rec.601 luma) on [0, 1]. Used as the
+            // Perceptual brightness (Rec.709 luma) on [0, 1]. Used as the
             // "valence" axis for scale-mode selection: dark images lean toward
-            // darker modes, bright ones toward brighter modes.
-            sumLuma += (0.299 * px.r + 0.587 * px.g + 0.114 * px.b) / 255.0;
+            // darker modes, bright ones toward brighter modes. Shares the single
+            // luma709 source with the brightness grid so the two never diverge.
+            sumLuma += luma709(px) / 255.0;
         }
     }
 

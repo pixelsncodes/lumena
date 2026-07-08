@@ -48,7 +48,7 @@ struct KeyDetection {
 /// Scales are built from a root MIDI note plus a scale-type interval pattern,
 /// so every key/type combination is available without listing them in
 /// scales.json.
-/// Maps perceptual brightness (`value`, Rec.601 luma in [0,1]) and `saturation`
+/// Maps perceptual brightness (`value`, Rec.709 luma in [0,1]) and `saturation`
 /// ([0,1]) to a scale family. Washed-out images (low saturation) pick a
 /// pentatonic; vivid + dark images pick harmonic minor or blues; otherwise a
 /// diatonic mode is chosen along the dark->bright luminance axis. Pure hue is
