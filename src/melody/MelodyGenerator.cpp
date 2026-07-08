@@ -573,7 +573,15 @@ private:
                 next = clampDegree(next + (gradient > 0.0f ? 1 : -1));
             }
             // Strong beats prefer a chord tone; weak beats may pass through.
-            if (strong && uni01() < 0.6) {
+            // The snap coin is drawn UNCONDITIONALLY (not short-circuited behind
+            // `strong`) so the RNG stream no longer depends on the strong-beat
+            // classification. This decouples the draw sequence from the upcoming
+            // clock/strong changes (bug 4: 4a/4b), so their output movement is
+            // attributable to logic, not to RNG re-alignment. This commit (4a-0)
+            // is a one-time RNG-ordering churn only — no clock or classification
+            // change. See DECISIONS / bug-4 notes.
+            const double snapCoin = uni01();
+            if (strong && snapCoin < 0.6) {
                 next = nearestChordToneDegree(next);
             }
             // Anti-stuck: never sit on the same degree twice running.
