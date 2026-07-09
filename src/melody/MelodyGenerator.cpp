@@ -1972,11 +1972,26 @@ Melody mutate(const Melody& base, const scales::Scale& scale, RegenLocks locks,
     const int span = std::max(options.octaveSpan, 2);
     std::uniform_real_distribution<double> coin(0.0, 1.0);
     std::uniform_int_distribution<int> stepPick(0, 3);  // +/-1 or +/-2 scale steps
-    const double durations[3] = {0.5, 1.0, 2.0};
-    std::uniform_int_distribution<int> durPick(0, 2);
 
-    for (std::size_t i = 0; i < out.notes.size(); ++i) {
+    // The input timeline span defines the bar count. A "small" mutation must not
+    // extend it, delete rests, or move onsets — those are the timing skeleton that
+    // makes the melody read as structured (Timing-Coherence Diagnosis). So mutate
+    // keeps every note's START fixed (onsets and the inter-phrase rests between
+    // them are preserved exactly) and only nudges LENGTHS by a bounded step,
+    // clamped to the note's own slot (the gap to the next onset) so nothing
+    // overlaps or spills past the input span. Bar count is therefore invariant.
+    const std::size_t nNotes = out.notes.size();
+    double inputSpan = 0.0;
+    for (const Note& n : out.notes)
+        inputSpan = std::max(inputSpan, n.startBeats + n.lengthBeats);
+    // Snap to the 1/16 (0.25-beat) grid so lengths stay on the 960-tick grid.
+    auto snapGrid = [](double beats) { return std::round(beats * 4.0) / 4.0; };
+
+    for (std::size_t i = 0; i < nNotes; ++i) {
         if (coin(rng) >= amt) continue;  // leave this note alone
+        // Never mutate the final note: it is the cadence AND it defines the span,
+        // so preserving it keeps the bar count exact and the landing intact.
+        if (i + 1 == nNotes) continue;
 
         // Pitch: nudge to a neighbouring scale degree (kept diatonic), unless
         // pitch is locked.
@@ -1988,23 +2003,23 @@ Melody mutate(const Melody& base, const scales::Scale& scale, RegenLocks locks,
             out.notes[i].noteNumber = nearestScaleNote(scale, approx, span);
         }
 
-        // Rhythm: retime this note to a neighbouring length, unless locked. The
-        // timeline is then re-laid so notes stay contiguous.
+        // Rhythm: a BOUNDED length nudge (one 0.5-beat groove step), unless locked.
+        // Onsets are untouched, so the note can grow only into its own slot (up to
+        // the next onset) and can shrink to a 1/16 floor — the groove and rests
+        // are preserved and the span cannot grow.
         if (!locks.rhythm) {
-            out.notes[i].lengthBeats = durations[durPick(rng)];
+            const double nextStart = out.notes[i + 1].startBeats;  // i+1 exists here
+            const double slot = nextStart - out.notes[i].startBeats;
+            const double delta = coin(rng) < 0.5 ? -0.5 : 0.5;
+            double newLen = snapGrid(out.notes[i].lengthBeats + delta);
+            const double floorLen = std::min(0.25, slot);
+            if (newLen < floorLen) newLen = floorLen;
+            if (newLen > slot) newLen = slot;
+            out.notes[i].lengthBeats = newLen;
         }
     }
-
-    // Re-lay start times if rhythm was allowed to change (keeps notes gapless).
-    if (!locks.rhythm) {
-        double beat = out.notes.front().startBeats;
-        for (Note& n : out.notes) {
-            n.startBeats = beat;
-            beat += n.lengthBeats;
-        }
-        if (options.loopBars > 0)
-            padToWholeBars(out, options.beatsPerBar, options.loopBars);
-    }
+    // No re-lay and no padToWholeBars: starts are unchanged and every length is
+    // clamped within the input span, so the bar count is preserved by construction.
     return out;
 }
 

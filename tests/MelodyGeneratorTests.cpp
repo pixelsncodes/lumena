@@ -1691,6 +1691,63 @@ Melody melodyOfPitches(const std::vector<int>& pitches) {
     return m;
 }
 
+// Phase 4b-fix: mutate preserves the timing skeleton. A "small" mutation keeps
+// the exact bar count of its input, leaves every ONSET (and thus the inter-phrase
+// rests) untouched, keeps notes within their slots (no overlap / no span growth),
+// and is deterministic given the seed. Uses a phrased melody (real rests + a
+// defined span) at two amounts across seeds.
+void test_mutate_preserves_bar_count_and_skeleton() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = minorPentatonic();
+
+    MelodyOptions o;
+    o.phraseMode = PhraseMode::Phrased;
+    o.length = 32;
+    o.loopBars = 8;
+    o.beatsPerBar = 4.0;
+
+    auto barCount = [&](const Melody& m) {
+        double span = 0.0;
+        for (const Note& n : m.notes)
+            span = std::max(span, n.startBeats + n.lengthBeats);
+        return static_cast<int>(std::ceil(span / o.beatsPerBar - 1e-9));
+    };
+
+    for (double amt : {0.30, 0.50}) {
+        for (unsigned seed = 1; seed <= 10; ++seed) {
+            std::mt19937 g(seed);
+            const Melody base = generateMelody(grid, scale, o, g);
+            if (base.notes.empty()) continue;
+
+            std::mt19937 mr(seed + 100u);
+            const Melody mut = mutate(base, scale, { false, false }, amt, o, mr);
+
+            CHECK(mut.notes.size() == base.notes.size());   // no notes added/removed
+            CHECK(barCount(mut) == barCount(base));         // bar count invariant
+
+            bool onsetsHeld = true, withinSlots = true;
+            const double span =
+                base.notes.back().startBeats + base.notes.back().lengthBeats;
+            for (std::size_t i = 0; i < mut.notes.size(); ++i) {
+                if (mut.notes[i].startBeats != base.notes[i].startBeats)
+                    onsetsHeld = false;  // onsets (and the rests) preserved exactly
+                const double end = mut.notes[i].startBeats + mut.notes[i].lengthBeats;
+                const double limit = (i + 1 < mut.notes.size())
+                                         ? mut.notes[i + 1].startBeats
+                                         : span;
+                if (end > limit + 1e-9) withinSlots = false;  // no overlap / no growth
+            }
+            CHECK(onsetsHeld);
+            CHECK(withinSlots);
+
+            std::mt19937 mr2(seed + 100u);
+            const Melody mut2 = mutate(base, scale, { false, false }, amt, o, mr2);
+            CHECK(melodyNotesIdentical(mut, mut2));          // deterministic per seed
+        }
+    }
+}
+
 // recombineLocked draws no RNG, so identical (previous, candidate, locks) inputs
 // splice to a byte-identical melody; mutate is deterministic given its seed and
 // varies with it. This is the "Regenerate is reproducible" guarantee at the
@@ -1874,6 +1931,7 @@ void run_melody_generator_tests() {
     test_repetition_repeats_motif();
     test_recombine_locks_dimensions();
     test_mutate_respects_locks();
+    test_mutate_preserves_bar_count_and_skeleton();
     test_splice_locks_deterministic();
     test_splice_count_matches_and_holds_last();
     test_lock_harmony_carries_progression();

@@ -1,3 +1,48 @@
+# Phase 4b-fix — mutate bar-clamp + phrase-aware splice
+
+Baseline Phase 4c (`37a114f`). Two independent post-hoc defect fixes from the
+Timing-Coherence Diagnosis. Generation is untouched (both fixes operate on emitted
+`Melody` note lists) — verified byte-identical to the prior commit on the
+checkerboard across all four modes.
+
+## Commit 1 — mutate preserves the timing skeleton and bar count
+
+**Defect:** `mutate` replaced note lengths with un-bar-aligned values
+{0.5,1.0,2.0}, re-laid the timeline **gapless (deleting the inter-phrase rests)**,
+and `padToWholeBars` only rounds UP — so a 0.30 mutation grew a 9-bar melody to 10
+bars and dismantled the groove.
+
+**Fix (chosen approach — fixed onsets, bounded length nudge):** the mutation now
+keeps every note's **START fixed**, so onsets and the rests between them are
+preserved exactly. Rhythm mutation is a **bounded ±0.5-beat length nudge** clamped
+to the note's own slot (the gap to the next onset) and floored at 1/16, on the
+960 grid — a note can only breathe within its slot, never move or overlap. The
+**final note is never mutated** (it is the cadence and it defines the span, so the
+bar count stays exact and the 4c landing is intact). No gapless re-lay, no
+`padToWholeBars` call. Bar count is invariant **by construction**.
+
+- *Why fixed onsets, not moving them?* Preserving the onset grid + rests is what
+  keeps the melody reading as structured; nudging only lengths (articulation) is
+  the small, skeleton-safe mutation the diagnosis asked for, and it cannot grow
+  the span or delete a rest. A meaningful onset-level rhythm variation would need
+  a bar-aware re-lay (harder, riskier) — deferred as the simpler reversible option.
+
+**Verified:** Mona Lisa, amount 0.30, seed 7 — base **9 bars → mutate 9 bars**
+(was 9 → 10). Tests: `test_mutate_preserves_bar_count_and_skeleton` (same note
+count, same bar count, onsets byte-unchanged, no note overruns its slot,
+deterministic per seed; amounts 0.30 & 0.50 × 10 seeds). Existing
+`test_mutate_respects_locks` still passes (lock rhythm ⇒ no length nudge, onsets
+already fixed ⇒ timing fully held; lock pitch ⇒ pitch held). Engine
+**22512/22512 green**.
+
+**Flagged follow-up (NOT fixed here — out of scope, would re-baseline generation):**
+`padToWholeBars` (`MelodyGenerator.cpp`) computes `bars = max(ceil(total), loopBars)`
+and never trims, so `loopBars` is a *floor*: the phrased path itself overshoots —
+an 8-bar loop renders as **9 bars** when the body runs long. Changing pad-to-trim
+behaviour is a generation re-baseline and belongs in its own pass.
+
+---
+
 # Phase 4c — Better cadences / phrase endings
 
 Baseline Phase 4b (`2126cca`). Scope: phrase endings only — mid-phrase generation,
