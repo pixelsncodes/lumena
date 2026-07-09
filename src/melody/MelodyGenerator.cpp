@@ -1040,11 +1040,17 @@ bool scaleIsMajor(const Scale& scale) {
 
 // MIDI notes of a diatonic chord: `size` tones stacked in thirds on diatonic
 // degree `deg` of the key (0..6), voiced upward from `baseMidi + tonicPc`.
-// Because the tones come from the 7-note major/minor scale, this is always a
-// real triad (or seventh), regardless of the melodic scale the image chose.
-std::vector<int> diatonicChord(int tonicPc, bool major, int deg, int size,
-                               int baseMidi) {
-    const int* steps = major ? kMajorSteps : kMinorSteps;
+// For a full 7-degree scale the thirds are stacked from the DETECTED scale's own
+// intervals, so modal / harmonic-minor colour is preserved (e.g. harmonic
+// minor's raised 7th makes the V a real major triad with its leading tone).
+// Scales without 7 degrees (pentatonics, the 6-note blues) have no diatonic
+// 7-note set to stack real thirds from, so they keep the major/minor step-table
+// fallback chosen by scaleIsMajor() — always a real triad regardless.
+std::vector<int> diatonicChord(const Scale& scale, int tonicPc, bool major,
+                               int deg, int size, int baseMidi) {
+    const int* steps = (scale.degreesPerOctave() == 7)
+                           ? scale.intervals.data()
+                           : (major ? kMajorSteps : kMinorSteps);
     std::vector<int> notes;
     notes.reserve(static_cast<std::size_t>(std::max(1, size)));
     for (int k = 0; k < size; ++k) {
@@ -1181,11 +1187,11 @@ Melody generateArpeggiated(const BrightnessGrid& grid, const Scale& scale,
             std::vector<int> asc;
             asc.reserve(static_cast<std::size_t>(3 * arpOctaves));
             for (int o = 0; o < arpOctaves; ++o)
-                for (int n : diatonicChord(tonicPc, major, roots[bar], 3,
+                for (int n : diatonicChord(scale, tonicPc, major, roots[bar], 3,
                                            kHarmonyBaseMidi + 12 * o))
                     asc.push_back(n);
             cycle = orderChord(asc, options.arpPattern);
-            barChord = diatonicChord(tonicPc, major, roots[bar], 3,
+            barChord = diatonicChord(scale, tonicPc, major, roots[bar], 3,
                                      kHarmonyBaseMidi);
         }
 
@@ -1318,7 +1324,7 @@ Melody generateChords(const BrightnessGrid& grid, const Scale& scale,
         // voice-led copy sorts by pitch, so `v` no longer identifies the root/
         // third/fifth once an inversion is chosen.
         const std::vector<int> chordPitches =
-            diatonicChord(tonicPc, major, roots[c], size, kHarmonyBaseMidi);
+            diatonicChord(scale, tonicPc, major, roots[c], size, kHarmonyBaseMidi);
         std::vector<int> notes = voiceLead(chordPitches, prevTop);
         prevTop = *std::max_element(notes.begin(), notes.end());
 

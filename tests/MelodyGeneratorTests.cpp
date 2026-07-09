@@ -69,6 +69,15 @@ Scale minorPentatonic() {
     return Scale{"A Minor Pentatonic", 57, {0, 3, 5, 7, 10}};
 }
 
+// D Harmonic Minor: like natural minor but with a RAISED 7th (interval 11, a
+// leading tone). Root D = MIDI 62 (pitch class 2); the leading tone is C#
+// (pitch class (2 + 11) % 12 == 1). Chords/Arp must spell the V from the scale's
+// own 7th, so the V is major (A-C#-E) and pitch class 1 is emitted. (Bug 5: the
+// engine currently spells from kMinorSteps and drops the raised 7th.)
+Scale dHarmonicMinor() {
+    return Scale{"D Harmonic Minor", 62, {0, 2, 3, 5, 7, 8, 11}};
+}
+
 // The scale-degree deltas within a phrase [begin, end) of the degree track.
 // Transposing a motif preserves these, so two phrases sharing a delta signature
 // are the same motif (possibly transposed).
@@ -896,6 +905,55 @@ void test_chords_are_diatonic_stacks() {
     }
 }
 
+// ---- bug 5: harmonic-minor leading tone (FAILING until the fix) --------------
+// Chords/Arp spell diatonic triads from kMajorSteps/kMinorSteps chosen by
+// scaleIsMajor(), never consulting the detected scale's own intervals. So a
+// harmonic-minor scale is spelled as natural minor, losing its raised 7th: the V
+// chord comes out minor (A-C-E) instead of major (A-C#-E) and the leading tone
+// (pitch class 1 for D harmonic minor) is never emitted. The V degree is in
+// every progression template, so ~4 bars always renders it — a correct spelling
+// WOULD emit pitch class 1. These two tests assert it does; they FAIL today.
+void test_chords_spell_harmonic_minor_leading_tone() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = dHarmonicMinor();
+    const int leadingTonePc = ((scale.rootNote % 12) + 11) % 12;  // C# = 1
+
+    MelodyOptions o;
+    o.mode = lumena::melody::GenerationMode::Chords;
+    o.chordSize = 3;
+    o.energy = 0.5;      // one chord per bar
+    o.loopBars = 4;      // one full I/IV/V/vi progression cycle
+    o.beatsPerBar = 4.0;
+    std::mt19937 rng(4u);
+    const Melody m = generateMelody(grid, scale, o, rng);
+
+    std::set<int> pcs;
+    for (const Note& n : m.notes) pcs.insert(((n.noteNumber % 12) + 12) % 12);
+    // The raised 7th (leading tone) must appear — it is the third of the V chord.
+    CHECK(pcs.count(leadingTonePc) == 1);
+}
+
+void test_arpeggio_spells_harmonic_minor_leading_tone() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = dHarmonicMinor();
+    const int leadingTonePc = ((scale.rootNote % 12) + 11) % 12;  // C# = 1
+
+    MelodyOptions o;
+    o.mode = lumena::melody::GenerationMode::Arpeggio;
+    o.arpPattern = ArpPattern::Up;
+    o.arpOctaves = 2;
+    o.arpRate = 0.5;
+    o.loopBars = 4;      // 4 bars of eighths = 32 notes, one full progression cycle
+    std::mt19937 rng(11u);
+    const Melody m = generateMelody(grid, scale, o, rng);
+
+    std::set<int> pcs;
+    for (const Note& n : m.notes) pcs.insert(((n.noteNumber % 12) + 12) % 12);
+    CHECK(pcs.count(leadingTonePc) == 1);
+}
+
 // ---- semantic axes ----------------------------------------------------------
 
 // Higher Energy raises overall velocity.
@@ -1088,6 +1146,8 @@ void run_melody_generator_tests() {
     test_loop_fills_whole_bars();
     test_arpeggiator_reproducible();
     test_chords_are_diatonic_stacks();
+    test_chords_spell_harmonic_minor_leading_tone();
+    test_arpeggio_spells_harmonic_minor_leading_tone();
     test_energy_raises_velocity();
     test_repetition_repeats_motif();
     test_recombine_locks_dimensions();
