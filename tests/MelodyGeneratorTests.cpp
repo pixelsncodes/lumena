@@ -531,6 +531,56 @@ void test_phrased_dynamics_peak_mid_phrase() {
     }
 }
 
+// ---- phrased mode: dynamics move smoothly, no per-beat whiplash -------------
+
+// Within a phrase, consecutive notes' velocities must not stab between extremes:
+// the generator low-passes the brightness tint and slew-caps the note-to-note
+// change to kMaxDynStep. At Energy 0.5 the post-generation energy scale is
+// exactly 1.0, so the emitted velocities carry the cap verbatim. (Jumps ACROSS a
+// phrase boundary are a fresh dynamic gesture and deliberately not capped, so the
+// check runs within each phrase, using phraseStarts.)
+void test_phrased_dynamics_are_smooth() {
+    constexpr int kMaxDynStep = 12;  // must match MelodyGenerator.cpp
+    const Image image = makeDiagonalGradient(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = minorPentatonic();
+
+    long maxWithinPhraseJump = 0;
+    int lo = 200, hi = 0;
+    for (unsigned seed = 1; seed <= 80; ++seed) {
+        MelodyOptions opts;
+        opts.length = 40;
+        opts.phraseMode = PhraseMode::Phrased;
+        opts.rhythm = RhythmMode::Flowing;
+        opts.energy = 0.5;         // energy scale == 1.0 -> the cap is exact
+        opts.arpeggioAmount = 0.0; // isolate the contour from ornaments
+        std::mt19937 rng(seed);
+        const Melody m = generateMelody(grid, scale, opts, rng);
+
+        const std::vector<std::size_t>& starts = m.phraseStarts;
+        CHECK(!starts.empty());
+        for (std::size_t p = 0; p < starts.size(); ++p) {
+            const std::size_t begin = starts[p];
+            const std::size_t end =
+                (p + 1 < starts.size()) ? starts[p + 1] : m.notes.size();
+            for (std::size_t i = begin + 1; i < end; ++i) {
+                const int d =
+                    std::abs(m.notes[i].velocity - m.notes[i - 1].velocity);
+                CHECK(d <= kMaxDynStep);  // no per-beat stab within a phrase
+                if (d > maxWithinPhraseJump) maxWithinPhraseJump = d;
+            }
+        }
+        for (const Note& n : m.notes) {
+            lo = std::min(lo, n.velocity);
+            hi = std::max(hi, n.velocity);
+        }
+    }
+    // Expression preserved: the fix removes whiplash, not the dynamic range.
+    CHECK(hi - lo >= 30);
+    // And the cap is genuinely exercised (guards against a vacuously flat pass).
+    CHECK(maxWithinPhraseJump >= 8);
+}
+
 // ---- phrased mode: the final tonic is approached by step, not a leap --------
 
 void test_phrased_ending_is_stepwise() {
@@ -1320,6 +1370,7 @@ void run_melody_generator_tests() {
     test_phrased_rests_between_phrases();
     test_phrased_arpeggios_in_scale();
     test_phrased_dynamics_peak_mid_phrase();
+    test_phrased_dynamics_are_smooth();
     test_phrased_ending_is_stepwise();
     test_cells_track_walk_freeform();
     test_cells_in_range_pure_random();

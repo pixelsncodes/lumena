@@ -79,6 +79,15 @@ constexpr double kPeakJitter = 0.08;
 constexpr double kPhraseEndArc = 0.2;
 // The last phrase of the piece is scaled down and tapers fully: a decrescendo.
 constexpr double kFinalPhraseScale = 0.85;
+// Dynamics smoothing (anti-whiplash). The brightness tint on velocity is the
+// only per-note-jumpy term (the random walk visits bright/dark cells back to
+// back), so it is one-pole low-passed across the phrase before it colours the
+// contour: kBrightnessInertia is the weight kept from the running value (higher
+// = smoother drift, less stab). Then the per-note velocity change is slew-capped
+// to kMaxDynStep so consecutive notes swell and settle instead of leaping
+// between extremes, while the phrase arc's own rise/fall still comes through.
+constexpr double kBrightnessInertia = 0.6;
+constexpr int kMaxDynStep = 12;
 // Probability an A'/A'' repeat is hoisted up an octave for lift.
 constexpr double kOctaveLiftProbability = 0.25;
 
@@ -521,6 +530,11 @@ public:
         const double scale = finalPhrase ? kFinalPhraseScale : 1.0;
         const double vspan = kContourVelHigh - kContourVelLow;
 
+        // Pass 1: the target velocity per note = the smooth arc blended with a
+        // LOW-PASSED brightness (so the image tint drifts with the phrase rather
+        // than stabbing note to note), clamped to the dynamic window.
+        double smoothBright = static_cast<double>(phrase[0].brightness);
+        std::vector<int> target(n);
         for (std::size_t i = 0; i < n; ++i) {
             const double t = n > 1 ? static_cast<double>(i) /
                                          static_cast<double>(n - 1)
@@ -533,11 +547,29 @@ public:
                 arc = 1.0 - (1.0 - endArc) * ((t - peakFrac) / (1.0 - peakFrac));
             }
             const double contourVel = (kContourVelLow + arc * vspan) * scale;
-            const double brightVel =
-                static_cast<double>(brightnessToVelocity(phrase[i].brightness));
-            const double v =
-                kContourWeight * contourVel + kBrightnessWeight * brightVel;
+            if (i > 0)
+                smoothBright = kBrightnessInertia * smoothBright +
+                               (1.0 - kBrightnessInertia) *
+                                   static_cast<double>(phrase[i].brightness);
+            const double brightVel = static_cast<double>(
+                brightnessToVelocity(static_cast<float>(smoothBright)));
+            double v = kContourWeight * contourVel + kBrightnessWeight * brightVel;
             int vi = static_cast<int>(std::lround(v));
+            if (vi < kDynamicMin) vi = kDynamicMin;
+            if (vi > kDynamicMax) vi = kDynamicMax;
+            target[i] = vi;
+        }
+
+        // Pass 2: slew-limit the note-to-note change so dynamics swell and settle
+        // within +/- kMaxDynStep instead of stabbing between extremes. The clamp
+        // toward the previous (in-range) velocity keeps every value in the window,
+        // so consecutive emitted velocities never differ by more than the cap.
+        phrase[0].velocity = target[0];
+        for (std::size_t i = 1; i < n; ++i) {
+            const int prev = phrase[i - 1].velocity;
+            int vi = target[i];
+            if (vi > prev + kMaxDynStep) vi = prev + kMaxDynStep;
+            if (vi < prev - kMaxDynStep) vi = prev - kMaxDynStep;
             if (vi < kDynamicMin) vi = kDynamicMin;
             if (vi > kDynamicMax) vi = kDynamicMax;
             phrase[i].velocity = vi;
