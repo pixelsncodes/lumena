@@ -1,3 +1,46 @@
+# Phase 4b — Locks + regeneration (post-hoc splice model)
+
+Baseline Phase 4a (`e282555`). Gate result (from the pre-code trace): pitch and
+rhythm share ONE interleaved mt19937 stream — **not** splittable without
+reordering draws and re-baselining everything. So **all locking is post-hoc on
+emitted `Melody` note lists** (`recombineLocked` / `mutate`); the melody walk and
+its draw order are untouched, generation stays byte-identical to 4a.
+
+## Commit 1 — harden the existing splice locks + count-matching
+
+`recombineLocked`, `mutate`, `RegenLocks` and the parent controller wiring
+(`MelodyController::regenerate`/`mutate`, `melodyLockRhythm`/`melodyLockPitch`)
+already existed. This commit fixes count-matching and adds engine tests.
+
+**Count-matching decision (implemented).** The **locked track is authoritative
+for both note count and timing.** `recombineLocked` previously cycled the pitch
+source with `i % pitchSrc.size()` — when the two tracks differed in length this
+jumped the pitch line back to note 1 mid-phrase. Replaced with **read-in-order,
+clamp-to-last**: `pi = min(i, pitchSrc.size()-1)`. When the pitch source is
+shorter its final pitch is held; when longer it truncates to the locked count.
+
+- *Why hold-last, not re-walk?* A true re-walk extension would need to re-run
+  generation (rng + generator state); `recombineLocked` is a pure post-hoc splice
+  with no rng, so a clean re-walk is out of scope here. Hold-last is the simpler
+  reversible option (per the working-loop rule) and removes the only audible
+  artifact (the cycle-back jump). If musically wanted later, a re-walk extension
+  belongs in the controller (regenerate the candidate at the locked length).
+
+**Tests added** (`MelodyGeneratorTests.cpp`): `test_splice_locks_deterministic`
+(recombine is pure — same in → byte-identical out; mutate deterministic given
+seed and varies with it) and `test_splice_count_matches_and_holds_last`
+(differing-count case: locked count authoritative, pitches in order then held,
+never cycled to 0; truncates when the pitch source is longer). The pre-existing
+`test_recombine_locks_dimensions` / `test_mutate_respects_locks` (equal-count
+Lock Rhythm / Lock Pitch / Mutate-honours-locks) still pass.
+
+**Isolation / determinism:** `recombineLocked` is called only from the parent
+controller — never from `generateMelody` or `lumena_demo` — so generation output
+is unaffected by construction. Verified: checkerboard phrased seed 2024
+byte-identical on re-run. Engine suite **24426/24426 green** (was 24389).
+
+---
+
 # Phase 4a — Scale-aware chords & arps
 
 Baseline `42bee86`. A **deliberate arp re-baseline**: same-seed determinism

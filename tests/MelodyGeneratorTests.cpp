@@ -30,7 +30,10 @@ using lumena::melody::kMaxVelocity;
 using lumena::melody::kMinVelocity;
 using lumena::melody::Melody;
 using lumena::melody::MelodyOptions;
+using lumena::melody::mutate;
 using lumena::melody::PhraseMode;
+using lumena::melody::recombineLocked;
+using lumena::melody::RegenLocks;
 using lumena::melody::RhythmMode;
 using lumena::midi::MidiFileWriter;
 using lumena::midi::MidiSequence;
@@ -1488,6 +1491,106 @@ void test_mutate_respects_locks() {
     CHECK(anyPitchChange);
 }
 
+// ---- Phase 4b: splice-lock determinism + count matching --------------------
+
+// True if two melodies are byte-identical in the emitted note track.
+bool melodyNotesIdentical(const Melody& a, const Melody& b) {
+    if (a.notes.size() != b.notes.size()) return false;
+    for (std::size_t i = 0; i < a.notes.size(); ++i) {
+        if (a.notes[i].noteNumber != b.notes[i].noteNumber) return false;
+        if (a.notes[i].velocity != b.notes[i].velocity) return false;
+        if (a.notes[i].startBeats != b.notes[i].startBeats) return false;
+        if (a.notes[i].lengthBeats != b.notes[i].lengthBeats) return false;
+    }
+    return true;
+}
+
+// A melody with the given pitches, one quarter note each (so the timing track is
+// well-defined and distinct per index — lets a splice test read both tracks).
+Melody melodyOfPitches(const std::vector<int>& pitches) {
+    Melody m;
+    double beat = 0.0;
+    for (int p : pitches) {
+        Note n;
+        n.noteNumber = p;
+        n.velocity = 80;
+        n.startBeats = beat;
+        n.lengthBeats = 1.0;
+        m.notes.push_back(n);
+        m.degrees.push_back(0);
+        m.cells.push_back(lumena::melody::GridCell{});
+        beat += 1.0;
+    }
+    return m;
+}
+
+// recombineLocked draws no RNG, so identical (previous, candidate, locks) inputs
+// splice to a byte-identical melody; mutate is deterministic given its seed and
+// varies with it. This is the "Regenerate is reproducible" guarantee at the
+// splice layer (generation reproducibility is covered by test_reproducible).
+void test_splice_locks_deterministic() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = minorPentatonic();
+
+    MelodyOptions o;
+    o.phraseMode = PhraseMode::Freeform;
+    o.length = 20;
+    std::mt19937 a(3u), b(4u);
+    const Melody prev = generateMelody(grid, scale, o, a);
+    const Melody cand = generateMelody(grid, scale, o, b);
+
+    const RegenLocks lockRhythm{ true, false };
+    const Melody s1 = recombineLocked(prev, cand, scale, lockRhythm, o);
+    const Melody s2 = recombineLocked(prev, cand, scale, lockRhythm, o);
+    CHECK(melodyNotesIdentical(s1, s2));  // pure: same in -> same out
+
+    std::mt19937 m1(55u), m2(55u);
+    const Melody u1 = mutate(prev, scale, { false, false }, 0.4, o, m1);
+    const Melody u2 = mutate(prev, scale, { false, false }, 0.4, o, m2);
+    CHECK(melodyNotesIdentical(u1, u2));  // deterministic given the seed
+
+    std::mt19937 m3(77u);
+    const Melody u3 = mutate(prev, scale, { false, false }, 0.4, o, m3);
+    CHECK(!melodyNotesIdentical(u1, u3));  // and varies with the seed
+}
+
+// When the two tracks differ in length, the LOCKED track is authoritative for
+// note count, and pitches are read in order and then HELD at the last value —
+// never cycled back to pitch 0 (the pre-4b artifact). Truncates when the pitch
+// source is longer than the locked count.
+void test_splice_count_matches_and_holds_last() {
+    const Scale scale = minorPentatonic();
+    MelodyOptions o;
+
+    // Candidate SHORTER than the locked-rhythm previous: pitches run out.
+    const Melody prev = melodyOfPitches({60, 61, 62, 63, 64, 65, 66, 67});  // 8
+    const Melody cand = melodyOfPitches({70, 71, 72});                      // 3
+    const Melody lr = recombineLocked(prev, cand, scale, { true, false }, o);
+
+    CHECK(lr.notes.size() == prev.notes.size());   // locked count authoritative
+    CHECK(lr.notes[0].noteNumber == 70);
+    CHECK(lr.notes[1].noteNumber == 71);
+    CHECK(lr.notes[2].noteNumber == 72);
+    for (std::size_t i = 3; i < lr.notes.size(); ++i) {
+        CHECK(lr.notes[i].noteNumber == 72);                       // last held
+        CHECK(lr.notes[i].noteNumber != cand.notes[0].noteNumber); // NOT cycled
+    }
+    for (std::size_t i = 0; i < lr.notes.size(); ++i) {            // timing = locked
+        CHECK(lr.notes[i].startBeats == prev.notes[i].startBeats);
+        CHECK(lr.notes[i].lengthBeats == prev.notes[i].lengthBeats);
+    }
+
+    // Candidate LONGER than the locked previous: pitch track truncates.
+    const Melody prev2 = melodyOfPitches({60, 61, 62});                  // 3
+    const Melody cand2 = melodyOfPitches({70, 71, 72, 73, 74, 75});      // 6
+    const Melody lr2 = recombineLocked(prev2, cand2, scale, { true, false }, o);
+    CHECK(lr2.notes.size() == prev2.notes.size());  // 3
+    CHECK(lr2.notes[0].noteNumber == 70);
+    CHECK(lr2.notes[1].noteNumber == 71);
+    CHECK(lr2.notes[2].noteNumber == 72);
+}
+
 // Mirrors the strong-beat predicate at MelodyGenerator.cpp:537: a beat position
 // is strong iff it lands exactly on an integer beat on the tick grid. Verifies
 // the integer test classifies integer beats as strong and half-beats as weak on
@@ -1555,4 +1658,6 @@ void run_melody_generator_tests() {
     test_repetition_repeats_motif();
     test_recombine_locks_dimensions();
     test_mutate_respects_locks();
+    test_splice_locks_deterministic();
+    test_splice_count_matches_and_holds_last();
 }

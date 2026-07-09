@@ -1850,8 +1850,15 @@ Melody recombineLocked(const Melody& previous, const Melody& candidate,
     if (previous.notes.empty()) return candidate;
     if (candidate.notes.empty()) return previous;
 
-    // The timing track (start/length) comes from the rhythm source; the pitch
-    // track (note/degree/velocity/cell) from the pitch source.
+    // The locked track is authoritative for BOTH note count and timing: the
+    // output has exactly the rhythm source's note count and its start/length,
+    // and pitches are read from the pitch source IN ORDER (never cycled). When
+    // the pitch source is longer it is truncated to the locked count; when it is
+    // shorter its LAST pitch is held for the remaining notes. Holding-the-last
+    // (rather than cycling from the start, the old behaviour) avoids a jarring
+    // "jump back to note 1" artifact where the two tracks differ in length; a
+    // true re-walk extension is out of scope for a post-hoc splice (this function
+    // has no rng/generator state). See SESSION_NOTES (Phase 4b).
     const Melody& rhythmSrc = locks.rhythm ? previous : candidate;
     const Melody& pitchSrc = locks.pitch ? previous : candidate;
     const int span = std::max(options.octaveSpan, 2);
@@ -1862,7 +1869,8 @@ Melody recombineLocked(const Melody& previous, const Melody& candidate,
     out.degrees.reserve(n);
     out.cells.reserve(n);
     for (std::size_t i = 0; i < n; ++i) {
-        const std::size_t pi = i % pitchSrc.notes.size();  // cycle pitches to fill
+        // In order, clamped to the last pitch (no cycle-from-start).
+        const std::size_t pi = std::min(i, pitchSrc.notes.size() - 1);
         Note note;
         note.startBeats = rhythmSrc.notes[i].startBeats;
         note.lengthBeats = rhythmSrc.notes[i].lengthBeats;
