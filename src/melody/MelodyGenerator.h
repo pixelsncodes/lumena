@@ -144,6 +144,17 @@ struct MelodyOptions {
 
     /// Beats per bar used for loop alignment (4.0 = common time).
     double beatsPerBar = 4.0;
+
+    /// Image-driven rhythmic density, in [0, 1] (Phase 3). 0 disables it: note
+    /// durations come purely from the session groove (the Phase-3 bar clock).
+    /// Above 0, each phrased note's local image contrast — the brightness range
+    /// in the cells around its source cell, i.e. detail/edges — subdivides it
+    /// into more, shorter notes: busy regions get denser rhythm, flat regions
+    /// stay long. Fully deterministic (a pure function of the grid, no RNG) and
+    /// always on the 960-tick grid. Only Phrased Melody mode consults it.
+    /// Defaults off so existing output and the RNG draw stream are unchanged;
+    /// the plugin will surface it as a "Density" / "Image Rhythm" control.
+    double imageRhythmAmount = 0.0;
 };
 
 /// The lowest and highest MIDI velocity brightness maps onto.

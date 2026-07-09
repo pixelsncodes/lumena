@@ -68,6 +68,28 @@ Image makeBright(int width, int height) {
     return Image(width, height, std::move(pixels));
 }
 
+// A per-grid-cell checkerboard: each `cellPx`-sized block flips between black
+// and white, so with a matching grid resolution every cell's 8-neighbourhood
+// spans the full 0..1 range — maximal local contrast, the density hook's cue to
+// subdivide. (makeBright, by contrast, has ~zero local contrast everywhere.)
+Image makeCheckerboard(int width, int height, int cellPx) {
+    std::vector<std::uint8_t> pixels(
+        static_cast<std::size_t>(width) * height * 4, 0);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const bool on = (((x / cellPx) + (y / cellPx)) % 2) == 0;
+            const auto g = static_cast<std::uint8_t>(on ? 255 : 0);
+            const std::size_t i =
+                (static_cast<std::size_t>(y) * width + x) * 4;
+            pixels[i + 0] = g;
+            pixels[i + 1] = g;
+            pixels[i + 2] = g;
+            pixels[i + 3] = 255;
+        }
+    }
+    return Image(width, height, std::move(pixels));
+}
+
 Scale minorPentatonic() {
     return Scale{"A Minor Pentatonic", 57, {0, 3, 5, 7, 10}};
 }
@@ -1025,6 +1047,73 @@ void test_phrased_tracks_brightness_at_high_influence() {
     CHECK(matchesHigh >= 2 * matchesLow);
 }
 
+// ---- Phase 3: image-driven rhythmic density ---------------------------------
+
+// Every note (start and length) lands on an integer tick of the 960 grid.
+bool allOnTickGrid(const Melody& m) {
+    constexpr double kTicks = 960.0;
+    for (const Note& n : m.notes) {
+        const double s = n.startBeats * kTicks;
+        const double l = n.lengthBeats * kTicks;
+        if (std::fabs(s - std::round(s)) > 1e-6) return false;
+        if (std::fabs(l - std::round(l)) > 1e-6) return false;
+    }
+    return true;
+}
+
+// imageRhythmAmount subdivides notes in high-contrast regions and does nothing
+// in flat ones, always on the grid, always in scale, and is a byte-exact no-op
+// at amount 0 (so the RNG stream and groove-only output are untouched).
+void test_phrased_image_density() {
+    const int cols = 16, rows = 12;
+    const Scale scale = minorPentatonic();
+    std::set<int> scalePcs;
+    for (int iv : scale.intervals) scalePcs.insert(((iv % 12) + 12) % 12);
+
+    const BrightnessGrid busy(makeCheckerboard(160, 120, 10), cols, rows);
+    const BrightnessGrid flat(makeBright(160, 120), cols, rows);
+
+    auto gen = [&](const BrightnessGrid& g, double amount, unsigned seed) {
+        MelodyOptions o;
+        o.length = 40;
+        o.phraseMode = PhraseMode::Phrased;
+        o.rhythm = RhythmMode::Flowing;
+        o.arpeggioAmount = 0.0;  // isolate density from ornaments
+        o.imageRhythmAmount = amount;
+        std::mt19937 rng(seed);
+        return generateMelody(g, scale, o, rng);
+    };
+
+    long denserSeeds = 0;
+    for (unsigned seed = 1; seed <= 40; ++seed) {
+        const Melody off = gen(busy, 0.0, seed);
+        const Melody on = gen(busy, 1.0, seed);
+
+        // Density only adds notes (post-walk, no RNG): same seed => the walk and
+        // its note count are identical, subdivisions only split existing notes.
+        CHECK(on.notes.size() >= off.notes.size());
+        if (on.notes.size() > off.notes.size()) ++denserSeeds;
+
+        // On-grid and in-scale even with maximal subdivision.
+        CHECK(allOnTickGrid(on));
+        for (const Note& n : on.notes) {
+            const int pc = ((n.noteNumber - scale.rootNote) % 12 + 12) % 12;
+            CHECK(scalePcs.count(pc) == 1);
+        }
+
+        // The split conserves total time: no beats invented or lost.
+        CHECK(std::abs(totalBeats(on) - totalBeats(off)) < 1e-6);
+
+        // A flat image has no local contrast, so density can't fire: the note
+        // count matches the amount-0 run exactly.
+        const Melody flatOff = gen(flat, 0.0, seed);
+        const Melody flatOn = gen(flat, 1.0, seed);
+        CHECK(flatOn.notes.size() == flatOff.notes.size());
+    }
+    // The checkerboard is high-contrast everywhere, so density fires broadly.
+    CHECK(denserSeeds >= 35);
+}
+
 // ---- semantic axes ----------------------------------------------------------
 
 // Higher Energy raises overall velocity.
@@ -1220,6 +1309,7 @@ void run_melody_generator_tests() {
     test_chords_spell_harmonic_minor_leading_tone();
     test_arpeggio_spells_harmonic_minor_leading_tone();
     test_phrased_tracks_brightness_at_high_influence();
+    test_phrased_image_density();
     test_energy_raises_velocity();
     test_repetition_repeats_motif();
     test_recombine_locks_dimensions();

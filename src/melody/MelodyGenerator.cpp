@@ -855,6 +855,54 @@ double barAlignedDuration(double startBeat, const std::vector<double>& tmpl) {
     return tmpl.back();  // unreachable: pos < periodTicks == acc
 }
 
+// The smallest note the density splitter will emit, in ticks: a 1/64 note
+// (960 / 64 = 15). Anything finer would risk falling off the 960 grid, so a
+// requested split that would go below this is refused (the note stays whole).
+constexpr long kMinSubdivisionTicks = kTicksPerBeat / 64;  // 15
+
+// Local image contrast of a grid cell, in [0, 1]: the brightness range
+// (max - min) over its 8-connected neighbourhood with wrapped edges (the same
+// wrap the walk uses). A flat region reads ~0 (hold long notes); a busy region
+// or an edge reads high (subdivide into denser rhythm).
+float localContrast(const BrightnessGrid& grid, int col, int row) {
+    const int cols = grid.columns();
+    const int rows = grid.rows();
+    float lo = 1.0f;
+    float hi = 0.0f;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            const float v =
+                grid.valueAt(wrap(col + dx, cols), wrap(row + dy, rows));
+            lo = std::min(lo, v);
+            hi = std::max(hi, v);
+        }
+    }
+    return hi > lo ? hi - lo : 0.0f;
+}
+
+// Pre-flatten image-density decision (Phase 3): sets each templated note's
+// `subdivisions` from its cell's local contrast, scaled by `amount`. 0..1 image
+// drive maps to 1..4 pieces; 2/3/4 all divide every groove length cleanly on the
+// 960 grid, so the flatten split stays on-grid. Deterministic — a pure function
+// of the image and `amount`, drawing no RNG — and a full no-op at amount == 0,
+// so the groove-only (Phase-3 Stage-1) output and the RNG stream are unchanged.
+// Ornament figures and the cadence note are left at 1 (their shape is fixed).
+void applyImageDensity(std::vector<std::vector<PhraseNote>>& phrases,
+                       const BrightnessGrid& grid, double amount) {
+    if (amount <= 0.0) return;
+    for (std::vector<PhraseNote>& phrase : phrases) {
+        for (PhraseNote& pn : phrase) {
+            if (!pn.templated) continue;
+            const double c =
+                static_cast<double>(localContrast(grid, pn.col, pn.row));
+            int extra = static_cast<int>(std::lround(c * amount * 3.0));
+            if (extra < 0) extra = 0;
+            if (extra > 3) extra = 3;
+            pn.subdivisions = 1 + extra;
+        }
+    }
+}
+
 // Builds a structured, phrased melody: motif (A), varied repeat (A'),
 // contrasting phrase (B), extended as needed (A'' B ...), then a tonic-landing
 // closing phrase. Rests fall between phrases at kRestProbability, and each
@@ -922,6 +970,12 @@ Melody generatePhrased(const BrightnessGrid& grid, const Scale& scale,
     // Closing phrase: cadence onto the tonic.
     phrases.push_back(builder.closingPhrase(motifLen));
 
+    // Image-driven density (Phase 3): decide, per templated note, how many
+    // on-grid pieces its groove length is split into, from its cell's local
+    // image contrast. Pre-flatten and RNG-free, so a flat image or amount == 0
+    // leaves every note whole and reproduces the groove-only output exactly.
+    applyImageDensity(phrases, grid, clampUnit(options.imageRhythmAmount));
+
     // Ornament each phrase (probabilistically), then flatten into timed notes,
     // inserting rests at phrase boundaries.
     double beat = 0.0;
@@ -957,24 +1011,48 @@ Melody generatePhrased(const BrightnessGrid& grid, const Scale& scale,
             // the real bar line (so it restarts each downbeat and re-aligns after
             // rests/ornaments); ornament figures and the cadence keep their own
             // hand-set durations. Straight mode keeps its flat quarter notes.
+            const bool templated =
+                pn.templated && options.rhythm == RhythmMode::Flowing;
             const double emitLen =
-                (pn.templated && options.rhythm == RhythmMode::Flowing)
-                    ? barAlignedDuration(beat, builder.rhythmTemplate())
-                    : pn.lengthBeats;
-            Note note;
-            note.noteNumber = pn.noteNumber;
-            note.velocity = applyEnergy(pn.velocity, options.energy);
-            note.startBeats = beat;
-            note.lengthBeats = emitLen;
-            melody.notes.push_back(note);
-            melody.degrees.push_back(pn.degree);
-            melody.cells.push_back(GridCell{pn.col, pn.row});
-            melody.dbgStrong.push_back(pn.dbgStrong ? 1 : 0);       // diagnostics only
-            melody.dbgSnapped.push_back(pn.dbgSnapped ? 1 : 0);     // diagnostics only
-            melody.dbgChordRoot.push_back(pn.dbgChordRoot);         // diagnostics only
-            snapCoins.push_back(pn.snapCoin);
-            eligible.push_back(pn.eligible ? 1 : 0);
-            beat += emitLen;
+                templated ? barAlignedDuration(beat, builder.rhythmTemplate())
+                          : pn.lengthBeats;
+
+            // Image density splits the groove length into `subs` equal pieces,
+            // but only while it stays exactly on the 960 grid (integer ticks) and
+            // no finer than 1/64 — otherwise the note stays whole. subs == 1
+            // (amount 0 / flat image / non-templated) is the plain single note.
+            int subs = 1;
+            if (templated && pn.subdivisions > 1) {
+                const long durTicks = std::lround(emitLen * kTicksPerBeat);
+                const int n = pn.subdivisions;
+                if (durTicks % n == 0 && durTicks / n >= kMinSubdivisionTicks)
+                    subs = n;
+            }
+            const double subLen = emitLen / static_cast<double>(subs);
+
+            for (int s = 0; s < subs; ++s) {
+                Note note;
+                note.noteNumber = pn.noteNumber;
+                note.velocity = applyEnergy(pn.velocity, options.energy);
+                note.startBeats = beat;
+                note.lengthBeats = subLen;
+                melody.notes.push_back(note);
+                melody.degrees.push_back(pn.degree);
+                melody.cells.push_back(GridCell{pn.col, pn.row});
+                // A split note is a rhythmic repeat of one pitch; only an unsplit
+                // note carries its snap eligibility and diagnostics. The added
+                // pieces are non-eligible (snapCoin 1.0 => pass 2 skips them), so
+                // every piece stays in unison and pass 2 / the dbg tracks ignore
+                // the subdivisions. At subs == 1 this is exactly the old single
+                // emission (identical dbg/eligible/snapCoin, one note).
+                const bool whole = (subs == 1);
+                melody.dbgStrong.push_back(whole && pn.dbgStrong ? 1 : 0);
+                melody.dbgSnapped.push_back(whole && pn.dbgSnapped ? 1 : 0);
+                melody.dbgChordRoot.push_back(whole ? pn.dbgChordRoot : -1);
+                snapCoins.push_back(whole ? pn.snapCoin : 1.0);
+                eligible.push_back(whole && pn.eligible ? 1 : 0);
+                beat += subLen;
+            }
         }
     }
 
