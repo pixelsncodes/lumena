@@ -968,6 +968,34 @@ void applyImageDensity(std::vector<std::vector<PhraseNote>>& phrases,
     }
 }
 
+// The scale degree for piece `s` of a note split into `subs` pieces by image
+// density (Phase 3.5). Piece 0 is always the note's own image-placed degree;
+// the rest are MELODIC CONTENT rather than unison repeats — the old even-chop
+// behaviour just restamped one pitch, which read as filler, not a hook. When
+// there is a gap to the next note (|end-start| >= 2) the pieces walk a stepwise
+// PASSING run toward it, stopping one degree short so the next note still lands
+// the arrival; otherwise they trace an oscillating NEIGHBOR figure around the
+// note. Fully deterministic (no RNG) and always a valid degree, so every piece
+// stays in scale and the density pass still draws no RNG.
+int densityFillDegree(int start, int end, int s, int subs, int totalDegrees) {
+    auto clampDeg = [totalDegrees](int d) {
+        if (d < 0) return 0;
+        if (d >= totalDegrees) return totalDegrees - 1;
+        return d;
+    };
+    if (s == 0 || subs <= 1) return clampDeg(start);
+    const int gap = end - start;
+    if (std::abs(gap) >= 2) {
+        const int step = gap > 0 ? 1 : -1;
+        const int maxOff = std::abs(gap) - 1;   // stop short of the arrival note
+        const int off = (s < maxOff ? s : maxOff) * step;
+        return clampDeg(start + off);
+    }
+    // Small/zero gap: a neighbour figure (start, nb, start, nb, ...).
+    const int nb = (start + 1 < totalDegrees) ? start + 1 : start - 1;
+    return clampDeg((s % 2 == 1) ? nb : start);
+}
+
 // Builds a structured, phrased melody: motif (A), varied repeat (A'),
 // contrasting phrase (B), extended as needed (A'' B ...), then a tonic-landing
 // closing phrase. Rests fall between phrases at kRestProbability, and each
@@ -1071,7 +1099,9 @@ Melody generatePhrased(const BrightnessGrid& grid, const Scale& scale,
         }
 
         melody.phraseStarts.push_back(melody.notes.size());
-        for (const PhraseNote& pn : phrases[p]) {
+        const std::vector<PhraseNote>& phrase = phrases[p];
+        for (std::size_t j = 0; j < phrase.size(); ++j) {
+            const PhraseNote& pn = phrase[j];
             // Templated notes take their emitted length from the groove tiled to
             // the real bar line (so it restarts each downbeat and re-aligns after
             // rests/ornaments); ornament figures and the cadence keep their own
@@ -1094,28 +1124,36 @@ Melody generatePhrased(const BrightnessGrid& grid, const Scale& scale,
                     subs = n;
             }
             const double subLen = emitLen / static_cast<double>(subs);
+            // Target degree the split walks toward: the next phrase note's degree
+            // (a stepwise passing run); at the phrase end there is none, so the
+            // fill folds back on the note itself (a neighbour turn). Piece 0 is
+            // always the note's own image-placed degree.
+            const int nextDeg = (j + 1 < phrase.size())
+                                     ? phrase[j + 1].degree
+                                     : pn.degree;
 
             for (int s = 0; s < subs; ++s) {
+                const bool primary = (s == 0);
+                const int deg = densityFillDegree(pn.degree, nextDeg, s, subs,
+                                                  totalDegrees);
                 Note note;
-                note.noteNumber = pn.noteNumber;
+                note.noteNumber = scale.noteAt(deg, options.octaveSpan);
                 note.velocity = applyEnergy(pn.velocity, options.energy);
                 note.startBeats = beat;
                 note.lengthBeats = subLen;
                 melody.notes.push_back(note);
-                melody.degrees.push_back(pn.degree);
+                melody.degrees.push_back(deg);
                 melody.cells.push_back(GridCell{pn.col, pn.row});
-                // A split note is a rhythmic repeat of one pitch; only an unsplit
-                // note carries its snap eligibility and diagnostics. The added
-                // pieces are non-eligible (snapCoin 1.0 => pass 2 skips them), so
-                // every piece stays in unison and pass 2 / the dbg tracks ignore
-                // the subdivisions. At subs == 1 this is exactly the old single
-                // emission (identical dbg/eligible/snapCoin, one note).
-                const bool whole = (subs == 1);
-                melody.dbgStrong.push_back(whole && pn.dbgStrong ? 1 : 0);
-                melody.dbgSnapped.push_back(whole && pn.dbgSnapped ? 1 : 0);
-                melody.dbgChordRoot.push_back(whole ? pn.dbgChordRoot : -1);
-                snapCoins.push_back(whole ? pn.snapCoin : 1.0);
-                eligible.push_back(whole && pn.eligible ? 1 : 0);
+                // The primary piece (s == 0) carries the note's image-placed
+                // degree, its snap eligibility and diagnostics; the added
+                // passing/neighbour pieces are melodic fill — non-eligible
+                // (snapCoin 1.0 => pass 2 skips them) and cleared in the dbg
+                // tracks. At subs == 1 this is exactly the old single emission.
+                melody.dbgStrong.push_back(primary && pn.dbgStrong ? 1 : 0);
+                melody.dbgSnapped.push_back(primary && pn.dbgSnapped ? 1 : 0);
+                melody.dbgChordRoot.push_back(primary ? pn.dbgChordRoot : -1);
+                snapCoins.push_back(primary ? pn.snapCoin : 1.0);
+                eligible.push_back(primary && pn.eligible ? 1 : 0);
                 beat += subLen;
             }
         }

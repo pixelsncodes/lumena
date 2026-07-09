@@ -1188,6 +1188,55 @@ void test_image_density_draws_no_rng() {
     }
 }
 
+// Phase 3.5: image density composes MELODIC CONTENT (passing/neighbour tones),
+// not unison chops. A subdivided note's extra pieces share its source cell but
+// must move in pitch (a passing run toward the next note, or a neighbour turn),
+// while every piece stays in scale. Regression guard for the "density chops
+// instead of composing" fix.
+void test_density_composes_melodic_content() {
+    const int cols = 16, rows = 12;
+    const Scale scale = minorPentatonic();
+    std::set<int> scalePcs;
+    for (int iv : scale.intervals) scalePcs.insert(((iv % 12) + 12) % 12);
+    const BrightnessGrid busy(makeCheckerboard(160, 120, 10), cols, rows);
+
+    long splitGroups = 0;    // adjacent notes sharing a source cell (a split)
+    long movedGroups = 0;    // ...of which at least one piece moved in pitch
+    for (unsigned seed = 1; seed <= 40; ++seed) {
+        MelodyOptions o;
+        o.length = 40;
+        o.phraseMode = PhraseMode::Phrased;
+        o.rhythm = RhythmMode::Flowing;
+        o.arpeggioAmount = 0.0;
+        o.imageRhythmAmount = 1.0;
+        std::mt19937 rng(seed);
+        const Melody m = generateMelody(busy, scale, o, rng);
+
+        // Every emitted note is in scale, split or not.
+        for (const Note& n : m.notes) {
+            const int pc = ((n.noteNumber - scale.rootNote) % 12 + 12) % 12;
+            CHECK(scalePcs.count(pc) == 1);
+        }
+
+        // Walk runs of consecutive notes that share a source cell (one split
+        // group) and check the group is not a single held pitch.
+        for (std::size_t i = 1; i < m.notes.size(); ++i) {
+            const bool sameCell = m.cells[i].col == m.cells[i - 1].col &&
+                                  m.cells[i].row == m.cells[i - 1].row;
+            if (!sameCell) continue;
+            ++splitGroups;
+            if (m.degrees[i] != m.degrees[i - 1]) ++movedGroups;
+        }
+    }
+    // The checkerboard subdivides broadly, so there are plenty of split groups,
+    // and the fill moves in pitch rather than repeating one note (old chop
+    // behaviour would leave movedGroups == 0).
+    CHECK(splitGroups > 50);
+    CHECK(movedGroups > 0);
+    // At least half of all split-group steps are melodic motion, not unison.
+    CHECK(movedGroups * 2 >= splitGroups);
+}
+
 // ---- semantic axes ----------------------------------------------------------
 
 // Higher Energy raises overall velocity.
@@ -1386,6 +1435,7 @@ void run_melody_generator_tests() {
     test_phrased_tracks_brightness_at_high_influence();
     test_phrased_image_density();
     test_image_density_draws_no_rng();
+    test_density_composes_melodic_content();
     test_energy_raises_velocity();
     test_repetition_repeats_motif();
     test_recombine_locks_dimensions();
