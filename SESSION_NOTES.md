@@ -1,3 +1,100 @@
+# Phase 4a — Scale-aware chords & arps
+
+Baseline `42bee86`. A **deliberate arp re-baseline**: same-seed determinism
+holds, non-arp modes are byte-identical to baseline, and the **arpeggiator's
+pitches intentionally change**. Chord/arp spelling path only — the melody
+generation path is untouched.
+
+## What was already done (verified, not re-done)
+
+- **Harmonic minor + all 7-degree modes** already spell from the detected
+  scale's own intervals — landed in `9242e9c` ("bug 5"), an ancestor of HEAD.
+  The V of D harmonic minor is already a real A-major triad with its C#
+  leading tone; `test_chords_spell_harmonic_minor_leading_tone` and
+  `test_arpeggio_spells_harmonic_minor_leading_tone` pass. Nothing to change.
+- **Pentatonics** already voice real triads via the major/minor fallback in
+  `diatonicChord` (stacking their raw degrees would give sus/quartal clusters),
+  so they were left exactly as-is.
+
+## The one real gap: Blues (6-degree) was flattened
+
+Blues `[0,3,5,6,7,10]` is a 6-note scale, so it fell through `diatonicChord`'s
+non-7-degree fallback, which spells a **plain minor triad** and silently drops
+the ♭7 blue note. Fix (arp only): a new `scaleIsBlues()` (signature trio
+♭3 + ♭5 + ♭7, unique to blues among the detected scales) makes the arp voice a
+**real minor-7th** (root-♭3-5-♭7) instead of a triad, so the ♭7 sounds.
+
+**Decision (per coordinating chat): in-scale spellings only.** Blues gets Am7/
+Dm7/Em7 (all tones inside the parent natural-minor key), **not** dominant-7th
+blues — the dominant's major 3rd is chromatic to the ♭3 melody and was
+explicitly rejected. General principle applied: spell chord tones strictly from
+the active scale/parent key; never introduce a chromatic tone to complete a
+"nicer" chord.
+
+- **Chords mode is unchanged for blues**: at `chordSize=3` it stays a minor
+  triad (a correct in-key chord), and at `chordSize>=4` the existing kMinorSteps
+  stacking already gives Am7 — so no code change was needed there. The ♭7 is
+  restored specifically in the **arp**, where a broken-chord figure is where the
+  7th adds motion. (If size-3 blues *chords* should also sound the ♭7 by
+  default, that's a small follow-up — flagged, not done, to respect the agreed
+  "size 3 stays a triad" behaviour.)
+
+## Arps now spell 1-3-5-8
+
+Every arp caps its ascent with the **octave root** (the "8"), so the figure
+resolves up to the octave instead of stopping on the fifth/seventh:
+`1-3-5-8` for one octave, `1-3-5-8-10-12-15` across two. This is a global arp
+change (all scales). Note **counts are unchanged** (still `bars * notesPerBar`);
+only pitches move — a clean pitch-only re-baseline. Blues combines both:
+`1-3-5-♭7-8`.
+
+## Verification
+
+Built headless (WSL `build-wsl`). Prior-commit demo built in a worktree for
+byte-comparison; worktree removed after.
+
+| Check (checkerboard fixture, seed 2024, 8 bars) | Result |
+|---|---|
+| Phrased  new-vs-prior | **byte-identical** |
+| Freeform new-vs-prior | **byte-identical** |
+| Chords   new-vs-prior | **byte-identical** |
+| Arp      new-vs-prior | **differs** (intended re-baseline) |
+| Arp same-seed re-run  | **byte-identical** (deterministic) |
+
+- Engine `LumenaTests`: **24389/24389 green** (was 24338; +51 from two new
+  tests + their loops): `test_arpeggio_blues_spells_in_scale_seventh` (a
+  seventh, role 3, is spelled AND every tone stays in the parent minor key) and
+  `test_arpeggio_resolves_to_octave` (root recurs an octave up — the 8 — and a
+  triad scale never spells a seventh).
+- Parent `lumen_tests` (build-linux): green **except** the pre-existing
+  `wavetable SHA-256 matches the pinned reference` (Lens golden pinned on the
+  Windows toolchain; Linux FP differs — unrelated, untouched).
+
+## Re-baselined samples — `samples/phase4a-arps/`
+
+Arp mode, seed 2024, 110 BPM, 8 bars, `--arpeggiate` (default UpDown, 2 oct),
+all 64 notes:
+
+| File | Detected key | Shows |
+|---|---|---|
+| `checkerboard-arp.mid` | A Minor Pentatonic | determinism fixture; 1-3-5-8 octave cap |
+| `mona-arp.mid`         | C Minor            | audition of 1-3-5-8 on a natural image |
+| `blues-arp.mid` (+ `blues-green.png`) | E Blues | audition of the restored ♭7 (min7 arp) |
+
+`blues-green.png` is a synthesised vivid-dark-green fixture (saturation 0.82,
+luma in the blues band) committed so the E-Blues detection is reproducible —
+none of the existing fixtures detect as blues. Measured on the E-Blues arp:
+prior chord-tone roles = {0,1,2} (triads only); new = {0,1,2,3} (a seventh
+spelled); pitch-class set unchanged and fully within E natural minor (no
+chromatic tone). WAV/MP3 still needs a soundfont on your end.
+
+## Not done / carried forward
+
+- `4b` locks/regeneration is **gated on its pre-code RNG trace** — not started.
+- Size-3 blues *chords* still stay plain minor triads by agreement (see above).
+
+---
+
 # Phase 3.5 — Motif-based phrasing (the "generated-sounding" fix)
 
 Branch `feature/motif-phrasing`, off `feature/image-contour` (baseline
