@@ -90,6 +90,10 @@ constexpr double kBrightnessInertia = 0.6;
 constexpr int kMaxDynStep = 12;
 // Probability an A'/A'' repeat is hoisted up an octave for lift.
 constexpr double kOctaveLiftProbability = 0.25;
+// Net brightness gradient (sum of the horizontal + vertical central differences
+// around the phrase's start cell) beyond which the phrase takes a rising or
+// falling contour; inside the band it arches (Phase 3.5 contour selection).
+constexpr float kContourSlopeThreshold = 0.03f;
 
 }  // namespace
 
@@ -334,19 +338,36 @@ public:
         }
     }
 
-    // Builds a phrase of `count` notes by walking the grid. When `newRegion` is
-    // set, the walk teleports to a random cell first (the contrasting-phrase B).
-    // When `tonicFifthEnding` is set, the last note is pulled hard toward the
-    // nearest tonic or fifth degree.
+    // Builds a phrase of `count` notes by walking the grid along an
+    // image-selected contour. When `newRegion` is set, the walk teleports to a
+    // random cell first (the contrasting-phrase B). When `tonicFifthEnding` is
+    // set, the last note is pulled hard toward the nearest tonic or fifth
+    // degree. The contour (Rise/Fall/Arch) is chosen from the brightness trend
+    // at the phrase's start cell and realised by steering the grid walk toward
+    // brighter/darker cells, so the existing brightness->degree blend turns the
+    // image's own brightness path into the melodic contour (Phase 3.5).
     std::vector<PhraseNote> walkPhrase(int count, bool newRegion,
                                        bool tonicFifthEnding) {
         localBeat_ = 0.0;  // strong-beat tracking is per-phrase
+        if (newRegion) {
+            // Teleport to a fresh region for the contrasting phrase B (the same
+            // two rng draws as before, moved here so the contour can be selected
+            // from the new region before the walk starts).
+            std::uniform_int_distribution<int> colDist(0, grid_.columns() - 1);
+            std::uniform_int_distribution<int> rowDist(0, grid_.rows() - 1);
+            col_ = colDist(rng_);
+            row_ = rowDist(rng_);
+        }
+        contour_ = selectContour(col_, row_);
+        contourIdx_ = 0;
+        contourLen_ = count > 0 ? count : 1;
+        prevCol_ = -1;  // no cell to avoid backtracking into yet
+        prevRow_ = -1;
         std::vector<PhraseNote> phrase;
         phrase.reserve(static_cast<std::size_t>(count));
         for (int i = 0; i < count; ++i) {
-            const bool jump = newRegion && i == 0;
             const bool ending = tonicFifthEnding && i == count - 1;
-            phrase.push_back(stepNote(jump, ending));
+            phrase.push_back(stepNote(ending));
         }
         return phrase;
     }
@@ -634,19 +655,43 @@ private:
     // image shapes contour without collapsing the line to one pitch), snapping to
     // a chord tone on strong beats. Duration comes from Energy/Complexity, not
     // brightness, so "energetic" is actually denser and more varied.
-    PhraseNote stepNote(bool jump, bool ending) {
+    PhraseNote stepNote(bool ending) {
         const float prevBright = grid_.valueAt(col_, row_);
-        if (jump || options_.cellPath == CellPath::PureRandom) {
+        if (options_.cellPath == CellPath::PureRandom) {
             std::uniform_int_distribution<int> colDist(0, grid_.columns() - 1);
             std::uniform_int_distribution<int> rowDist(0, grid_.rows() - 1);
             col_ = colDist(rng_);
             row_ = rowDist(rng_);
         } else {
-            std::uniform_int_distribution<int> stepDist(0, 7);
-            const int k = stepDist(rng_);
-            col_ = wrap(col_ + kDx[k], grid_.columns());
-            row_ = wrap(row_ + kDy[k], grid_.rows());
+            // Contour-directed step (Phase 3.5): move to the neighbour that best
+            // follows the phrase's image-selected contour — climb toward
+            // brighter cells on a rising contour, descend toward darker ones on
+            // a falling one — excluding the cell we just came from so the walk
+            // progresses instead of oscillating. Deterministic (no RNG), so the
+            // motif shape is locked to the image and recognisable across seeds.
+            const int dir = contourDir(contour_, contourIdx_, contourLen_);
+            const int cols = grid_.columns();
+            const int rows = grid_.rows();
+            int bestK = -1;
+            float bestScore = -std::numeric_limits<float>::max();
+            for (int k = 0; k < 8; ++k) {
+                const int nc = wrap(col_ + kDx[k], cols);
+                const int nr = wrap(row_ + kDy[k], rows);
+                if (nc == prevCol_ && nr == prevRow_) continue;
+                const float score = static_cast<float>(dir) *
+                                    (grid_.valueAt(nc, nr) - prevBright);
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestK = k;
+                }
+            }
+            if (bestK < 0) bestK = 0;  // degenerate (tiny grid): keep moving
+            prevCol_ = col_;
+            prevRow_ = row_;
+            col_ = wrap(col_ + kDx[bestK], cols);
+            row_ = wrap(row_ + kDy[bestK], rows);
         }
+        ++contourIdx_;
 
         const float brightness = grid_.valueAt(col_, row_);
         const float gradient = brightness - prevBright;
@@ -759,6 +804,43 @@ private:
         if (d < 0) return 0;
         if (d >= totalDegrees_) return totalDegrees_ - 1;
         return d;
+    }
+
+    // ---- image-selected phrase contour (Phase 3.5) --------------------------
+    // §4 melody contours pulled from the design reference: Stepwise-Rise,
+    // Stepwise-Fall, and Arch. Kept to three (the "2-3 contours only" budget).
+    enum class Contour { Rise, Fall, Arch };
+
+    // Chooses the contour for a phrase from the image brightness trend around
+    // its start cell (§10 "brightness rises -> melody ascends"): a net-brightening
+    // region rises, a net-darkening region falls, a flat/peaked region arches.
+    // Deterministic — no RNG — so the same image yields the same phrase shape
+    // across seeds (the hook stays recognisable while the seed varies the
+    // arrangement), and different images select different shapes.
+    Contour selectContour(int c, int r) const {
+        const int cols = grid_.columns();
+        const int rows = grid_.rows();
+        const float sx = grid_.valueAt(wrap(c + 1, cols), r) -
+                         grid_.valueAt(wrap(c - 1, cols), r);
+        const float sy = grid_.valueAt(c, wrap(r + 1, rows)) -
+                         grid_.valueAt(c, wrap(r - 1, rows));
+        const float slope = sx + sy;
+        if (slope > kContourSlopeThreshold) return Contour::Rise;
+        if (slope < -kContourSlopeThreshold) return Contour::Fall;
+        return Contour::Arch;
+    }
+
+    // The desired brightness step direction at position `idx` of a length-`len`
+    // contour phrase: +1 climb toward brighter cells, -1 toward darker. Rise
+    // climbs throughout, Fall descends throughout, Arch climbs to its interior
+    // midpoint then descends (a peak, so the phrase builds and resolves).
+    int contourDir(Contour c, int idx, int len) const {
+        switch (c) {
+            case Contour::Rise: return +1;
+            case Contour::Fall: return -1;
+            case Contour::Arch: return idx < (len - 1) / 2 ? +1 : -1;
+        }
+        return +1;
     }
 
     // The chord tone (tonic-triad pitch class) nearest to degree `from`.
@@ -877,6 +959,14 @@ private:
     float bias_;
     int col_;
     int row_;
+    // Contour state for the phrase currently being walked (Phase 3.5): the
+    // selected shape, the note index within the phrase, its length, and the
+    // previous cell (excluded from the next step so the walk never backtracks).
+    Contour contour_ = Contour::Rise;
+    int contourIdx_ = 0;
+    int contourLen_ = 1;
+    int prevCol_ = -1;
+    int prevRow_ = -1;
     std::size_t degree_;
     double localBeat_ = 0.0;  // beats elapsed since the current phrase began
     int chordPcs_[3] = {0, 4, 7};  // current-chord pitch classes (strong-beat targets)
