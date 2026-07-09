@@ -42,6 +42,31 @@ pass. Engine **24520/24520 green**.
 (unchanged — pitch-only); endings now land on chord tones. Same-seed re-run
 byte-identical (deterministic).
 
+## Commit 2 — cadential length: phrase endings settle
+
+The LAST note of each **non-closing** phrase now settles to at least a dotted
+quarter (`kPhraseEndCadenceBeats = 1.5`, tunable) so phrases land instead of
+cutting off. Fed pre-flatten via the emitted length only — the flatten
+accumulator absorbs it and the next phrase re-aligns to the bar as usual; **no
+parallel counter/clock**. It only ever EXTENDS (never shortens), stays on the
+0.5-beat grid (1.5 beat = 1440 ticks), and leaves the ending note WHOLE (no
+density subdivision on a cadence). The closing phrase keeps its own longer
+cadence (`kCadenceBeats = 2.0`, unchanged).
+
+**Consequence for density:** because phrase-final notes are now left whole, a
+busy image subdivides slightly fewer notes. Checkerboard density counts re-baseline
+**103 → 91** (density 0.5) and **136 → 118** (density 1.0); **density 0 is
+unchanged at 37** (the settle changes only the ending's length there, not the
+count) and stays a deterministic no-op. This is the intended trade — endings settle
+even inside busy passages, giving contrast.
+
+**On-grid / determinism:** verified 0 off-grid note starts on the checkerboard
+(durations land on {0.25, 0.5, 0.75, 1.5, 4.0}); same-seed re-run byte-identical.
+**Test:** `test_phrase_endings_settle_longer` (every non-closing phrase's final
+note is >= 1.5 beats). Engine **22412/22412 green** (the check total drops vs
+Commit 1 because density-on melodies now emit fewer subdivided notes, not because
+any assertion was skipped). Parent green except the pre-existing wavetable golden.
+
 ---
 
 # Phase 4b — Locks + regeneration (post-hoc splice model)

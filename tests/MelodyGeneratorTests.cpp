@@ -765,6 +765,37 @@ void test_phrased_cadence_deterministic() {
     CHECK(identical);
 }
 
+// Every non-closing phrase's final note settles to a cadential length (>= a
+// dotted quarter) so phrases land instead of cutting off. Checked on the
+// checkerboard with ornaments/density off (1:1 PhraseNote -> Note, so the last
+// note of each phrase is its ending). The closing phrase (the last one) has its
+// own, longer cadence length and is excluded.
+void test_phrase_endings_settle_longer() {
+    const BrightnessGrid grid(makeCheckerboard(160, 120, 10), 16, 12);
+    const Scale scale = minorPentatonic();
+
+    MelodyOptions o;
+    o.phraseMode = PhraseMode::Phrased;
+    o.length = 32;
+    o.loopBars = 8;
+    o.arpeggioAmount = 0.0;
+    o.imageRhythmAmount = 0.0;
+
+    int checked = 0;
+    for (unsigned seed = 1; seed <= 20; ++seed) {
+        std::mt19937 rng(seed);
+        const Melody m = generateMelody(grid, scale, o, rng);
+        if (m.notes.empty() || m.phraseStarts.size() < 2) continue;
+        // Phrases 0 .. size-2 are the non-closing phrases (the last is the cadence).
+        for (std::size_t p = 0; p + 1 < m.phraseStarts.size(); ++p) {
+            const std::size_t end = m.phraseStarts[p + 1] - 1;
+            CHECK(m.notes[end].lengthBeats >= 1.5 - 1e-9);  // settled, not abrupt
+            ++checked;
+        }
+    }
+    CHECK(checked > 0);
+}
+
 // ---- source cells: parallel track, in range, and tracking the walk ----------
 
 // True when cells `a` and `b` are 8-connected neighbours on a cols x rows grid
@@ -1820,6 +1851,7 @@ void run_melody_generator_tests() {
     test_phrased_endings_resolve_to_chord_tone();
     test_harmonic_minor_cadence_uses_leading_tone();
     test_phrased_cadence_deterministic();
+    test_phrase_endings_settle_longer();
     test_cells_track_walk_freeform();
     test_cells_in_range_pure_random();
     test_cells_reproducible();

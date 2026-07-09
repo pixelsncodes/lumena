@@ -48,6 +48,10 @@ constexpr double kRestProbability = 0.6;
 constexpr float kPhraseEndBias = 0.85f;
 // The cadence (final) note is at least this long, in beats (a half note).
 constexpr double kCadenceBeats = 2.0;
+// A non-closing phrase's last note settles to at least this long (a dotted
+// quarter) so phrases breathe and land instead of cutting off — shorter than the
+// full closing cadence, and on the 0.5-beat grid. Tunable (Phase 4c decision).
+constexpr double kPhraseEndCadenceBeats = 1.5;
 // Cells at least this bright are preferred as arpeggio ornament sites.
 constexpr float kArpeggioBrightness = 0.7f;
 // Tick resolution for strong-beat detection AND rhythm quantisation: beat
@@ -1243,16 +1247,28 @@ Melody generatePhrased(const BrightnessGrid& grid, const Scale& scale,
             // hand-set durations. Straight mode keeps its flat quarter notes.
             const bool templated =
                 pn.templated && options.rhythm == RhythmMode::Flowing;
-            const double emitLen =
+            double emitLen =
                 templated ? barAlignedDuration(beat, builder.rhythmTemplate())
                           : pn.lengthBeats;
+
+            // Cadential settle (Phase 4c): the LAST note of a non-closing phrase
+            // lands longer so the phrase breathes instead of cutting off abruptly.
+            // Fed pre-emission via the length only (no new counter / clock) — the
+            // flatten accumulator absorbs it and the next phrase re-aligns to the
+            // bar as usual. Only EXTENDS (never shortens), stays on the 0.5 grid,
+            // and leaves the note whole (no density subdivision on the ending). The
+            // closing phrase sets its own, longer cadence length in closingPhrase.
+            const bool phraseFinalNote = (j + 1 == phrase.size());
+            const bool settleEnding = phraseFinalNote && !finalPhrase;
+            if (settleEnding)
+                emitLen = std::max(emitLen, kPhraseEndCadenceBeats);
 
             // Image density splits the groove length into `subs` equal pieces,
             // but only while it stays exactly on the 960 grid (integer ticks) and
             // no finer than 1/64 — otherwise the note stays whole. subs == 1
             // (amount 0 / flat image / non-templated) is the plain single note.
             int subs = 1;
-            if (templated && pn.subdivisions > 1) {
+            if (!settleEnding && templated && pn.subdivisions > 1) {
                 const long durTicks = std::lround(emitLen * kTicksPerBeat);
                 const int n = pn.subdivisions;
                 if (durTicks % n == 0 && durTicks / n >= kMinSubdivisionTicks)
