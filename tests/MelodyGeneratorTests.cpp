@@ -629,6 +629,142 @@ void test_phrased_ending_is_stepwise() {
     }
 }
 
+// ---- Phase 4c: cadences / phrase endings -----------------------------------
+
+// The pitch classes of a diatonic triad on progression root degree `root`,
+// spelled exactly as the engine's updateHarmonyTarget (parent major/minor triad,
+// so it is a real chord even over a pentatonic melodic scale).
+std::set<int> activeChordPcs(const Scale& scale, int root) {
+    const int minorSteps[7] = {0, 2, 3, 5, 7, 8, 10};
+    const int majorSteps[7] = {0, 2, 4, 5, 7, 9, 11};
+    bool hasM3 = false, hasm3 = false;
+    for (int iv : scale.intervals) {
+        const int pc = ((iv % 12) + 12) % 12;
+        if (pc == 4) hasM3 = true;
+        if (pc == 3) hasm3 = true;
+    }
+    const int* steps = (hasM3 && ! hasm3) ? majorSteps : minorSteps;
+    const int tonicPc = ((scale.rootNote % 12) + 12) % 12;
+    std::set<int> pcs;
+    for (int k = 0; k < 3; ++k) {
+        const int deg = (((root + 2 * k) % 7) + 7) % 7;
+        pcs.insert(((tonicPc + steps[deg]) % 12 + 12) % 12);
+    }
+    return pcs;
+}
+
+// A walked phrase ending resolves to a chord tone of the ACTIVE harmony (the bar
+// it ends over) far more reliably than a mid-phrase note does — landing, not
+// drifting. Measured on the checkerboard with ornaments/density OFF (so every
+// PhraseNote maps 1:1 to an emitted note and each phrase's last note IS its
+// ending). Walked notes carry the generation-time chord root in dbgChordRoot;
+// copied/varied phrases clear it to -1 and are skipped.
+void test_phrased_endings_resolve_to_chord_tone() {
+    const BrightnessGrid grid(makeCheckerboard(160, 120, 10), 16, 12);
+    const Scale scale = minorPentatonic();
+
+    MelodyOptions o;
+    o.phraseMode = PhraseMode::Phrased;
+    o.length = 32;
+    o.loopBars = 8;
+    o.beatsPerBar = 4.0;
+    o.arpeggioAmount = 0.0;     // no ornaments: 1:1 PhraseNote -> Note
+    o.imageRhythmAmount = 0.0;  // no density subdivision
+
+    int endTot = 0, endChord = 0, midTot = 0, midChord = 0;
+    for (unsigned seed = 1; seed <= 20; ++seed) {
+        std::mt19937 rng(seed);
+        const Melody m = generateMelody(grid, scale, o, rng);
+        const std::size_t n = m.notes.size();
+        if (n == 0 || m.dbgChordRoot.size() != n) continue;
+
+        std::set<std::size_t> phraseFinal;
+        for (std::size_t p = 0; p < m.phraseStarts.size(); ++p)
+            phraseFinal.insert(
+                (p + 1 < m.phraseStarts.size() ? m.phraseStarts[p + 1] : n) - 1);
+
+        for (std::size_t i = 0; i < n; ++i) {
+            const int root = m.dbgChordRoot[i];
+            if (root < 0) continue;  // copied/varied phrase or the closing tonic
+            const int pc = ((m.notes[i].noteNumber % 12) + 12) % 12;
+            const bool isChord = activeChordPcs(scale, root).count(pc) == 1;
+            if (phraseFinal.count(i)) { ++endTot; endChord += isChord ? 1 : 0; }
+            else { ++midTot; midChord += isChord ? 1 : 0; }
+        }
+    }
+    CHECK(endTot > 0);
+    CHECK(midTot > 0);
+    const double endRate = static_cast<double>(endChord) / endTot;
+    const double midRate = static_cast<double>(midChord) / midTot;
+    CHECK(endRate >= 0.9);       // endings reliably land on the active chord
+    CHECK(endRate > midRate);    // ...far more reliably than a mid-phrase note
+}
+
+// The closing cadence of a leading-tone scale (harmonic minor: leading tone C#,
+// pitch class 1) resolves the final tonic THROUGH the leading tone — approaching
+// from a semitone below — WHENEVER the harmony supports it, i.e. whenever the
+// final tonic is not the very bottom of the range (so a scale step below exists).
+// The final note is always the tonic, held for a cadential length. When the tonic
+// lands at the bottom (no step below) the cadence approaches from above instead,
+// which is correct — so the invariant is "leading tone every time it is possible".
+void test_harmonic_minor_cadence_uses_leading_tone() {
+    const BrightnessGrid grid(makeCheckerboard(160, 120, 10), 16, 12);
+    const Scale scale = dHarmonicMinor();
+    const int tonicPc = ((scale.rootNote % 12) + 12) % 12;          // D = 2
+    const int leadingTonePc = ((scale.rootNote % 12) + 11) % 12;    // C# = 1
+
+    int possible = 0, leadingWhenPossible = 0;
+    for (unsigned seed = 1; seed <= 40; ++seed) {
+        MelodyOptions o;
+        o.phraseMode = PhraseMode::Phrased;
+        o.length = 24;
+        o.arpeggioAmount = 0.0;     // no ornaments: the last two notes are the cadence
+        o.imageRhythmAmount = 0.0;
+        std::mt19937 rng(seed);
+        const Melody m = generateMelody(grid, scale, o, rng);
+        const std::size_t n = m.notes.size();
+        if (n < 2) continue;
+
+        CHECK(((m.notes[n - 1].noteNumber % 12) + 12) % 12 == tonicPc);  // land on tonic
+        CHECK(m.notes[n - 1].lengthBeats >= 2.0);                        // cadential length
+        // A scale step below the final tonic exists iff its degree is > 0.
+        if (m.degrees[n - 1] > 0) {
+            ++possible;
+            if (((m.notes[n - 2].noteNumber % 12) + 12) % 12 == leadingTonePc)
+                ++leadingWhenPossible;
+        }
+    }
+    CHECK(possible > 0);                         // the case actually arises
+    CHECK(leadingWhenPossible == possible);      // leading tone used every time it can be
+}
+
+// The ending path is deterministic: same image + settings + seed => identical
+// MIDI, including the cadence changes (harmonic-minor leading tone + chord-tone
+// resolution). Exercised on the checkerboard (exact, reproducible).
+void test_phrased_cadence_deterministic() {
+    const BrightnessGrid grid(makeCheckerboard(160, 120, 10), 16, 12);
+    const Scale scale = dHarmonicMinor();
+
+    MelodyOptions o;
+    o.phraseMode = PhraseMode::Phrased;
+    o.length = 32;
+    o.loopBars = 8;
+    std::mt19937 a(2024u), b(2024u);
+    const Melody m1 = generateMelody(grid, scale, o, a);
+    const Melody m2 = generateMelody(grid, scale, o, b);
+
+    CHECK(m1.notes.size() == m2.notes.size());
+    bool identical = m1.notes.size() == m2.notes.size();
+    for (std::size_t i = 0; i < m1.notes.size() && identical; ++i) {
+        if (m1.notes[i].noteNumber != m2.notes[i].noteNumber ||
+            m1.notes[i].velocity != m2.notes[i].velocity ||
+            m1.notes[i].startBeats != m2.notes[i].startBeats ||
+            m1.notes[i].lengthBeats != m2.notes[i].lengthBeats)
+            identical = false;
+    }
+    CHECK(identical);
+}
+
 // ---- source cells: parallel track, in range, and tracking the walk ----------
 
 // True when cells `a` and `b` are 8-connected neighbours on a cols x rows grid
@@ -1681,6 +1817,9 @@ void run_melody_generator_tests() {
     test_phrased_dynamics_peak_mid_phrase();
     test_phrased_dynamics_are_smooth();
     test_phrased_ending_is_stepwise();
+    test_phrased_endings_resolve_to_chord_tone();
+    test_harmonic_minor_cadence_uses_leading_tone();
+    test_phrased_cadence_deterministic();
     test_cells_track_walk_freeform();
     test_cells_in_range_pure_random();
     test_cells_reproducible();

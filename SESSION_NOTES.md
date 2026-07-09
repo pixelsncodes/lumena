@@ -1,3 +1,49 @@
+# Phase 4c — Better cadences / phrase endings
+
+Baseline Phase 4b (`2126cca`). Scope: phrase endings only — mid-phrase generation,
+locks and arps untouched. Two small tested commits; a deliberate re-baseline of
+endings (intended) with the draw stream kept stream-stable.
+
+## Commit 1 — cadential pitch: endings resolve, cadence uses the leading tone
+
+Two pitch-domain changes in the ending path, both **draw-count neutral** (same
+RNG draws, in the same order — only the deterministic outcome changes):
+
+1. **Endings land on the active harmony** (`stepNote` ending branch). A walked
+   phrase's final note now biases toward *and then deterministically snaps to* a
+   chord tone of the CURRENT bar's chord (`nearestChordToneDegree`), instead of
+   always the key tonic/fifth. The single `nextBiased` draw is preserved (stream
+   identity); the snap adds no draw. So phrases resolve onto root/3rd/5th of the
+   chord they end over — landing, not drifting.
+2. **Leading-tone cadence** (`closingPhrase`). When the scale step just below the
+   tonic is the leading tone — a semitone below (pitch class 11 above the root:
+   major and harmonic minor; absent in the minor modes) — the closing cadence
+   approaches the final tonic UP through it (V's raised 7th → i, reusing the tone
+   4a spells in the V chord). Otherwise the nearer-step approach is unchanged. The
+   leading tone is used **every time the tonic isn't at the very bottom of the
+   range** (no step below there — then it approaches from above, correctly).
+
+Draw stream: the ending branch still draws exactly one `nextBiased`; the cell
+walk is contour/brightness-driven (independent of pitch), so **no draw is
+added/removed/reordered** for any note. Downstream pitches shift only because the
+cadence changes the Markov state (`degree_`) carried into the next phrase — the
+intended re-baseline, not a stream perturbation.
+
+**Tests:** `test_phrased_endings_resolve_to_chord_tone` (checkerboard, ornaments/
+density off: walked phrase-final notes are chord tones of their generation-time
+chord — via `dbgChordRoot` — at ≥ 90%, and FAR more often than mid-phrase notes);
+`test_harmonic_minor_cadence_uses_leading_tone` (the leading tone is the approach
+every time a step below the tonic exists; final note is the tonic held ≥ 2 beats);
+`test_phrased_cadence_deterministic` (same seed ⇒ identical, harmonic minor).
+Existing `test_phrased_cadence_on_tonic` / `test_phrased_ending_is_stepwise` still
+pass. Engine **24520/24520 green**.
+
+**Re-baseline (checkerboard, seed 2024, 8 bars):** note count **37 → 37**
+(unchanged — pitch-only); endings now land on chord tones. Same-seed re-run
+byte-identical (deterministic).
+
+---
+
 # Phase 4b — Locks + regeneration (post-hoc splice model)
 
 Baseline Phase 4a (`e282555`). Gate result (from the pre-code trace): pitch and

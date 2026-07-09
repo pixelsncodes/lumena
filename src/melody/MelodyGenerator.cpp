@@ -398,7 +398,16 @@ public:
             if (aboveOk || belowOk) {
                 PhraseNote& approach = phrase.back();
                 int stepDegree;
-                if (aboveOk && belowOk) {
+                // Leading-tone cadence: when the scale step just below the tonic is
+                // the leading tone — a semitone below (pitch class 11 above the
+                // root), present in major and harmonic minor, absent in the minor
+                // modes — resolve UP through it (the V→i leading-tone pull, reusing
+                // the raised 7th the scale already spells; see 4a's V chord). Phase
+                // 4c. Otherwise approach by whichever neighbouring step is nearer to
+                // where the walk left off, keeping the contour smooth (as before).
+                if (belowOk && pitchClassOf(tonic - 1) == 11) {
+                    stepDegree = tonic - 1;
+                } else if (aboveOk && belowOk) {
                     stepDegree = std::abs((tonic + 1) - approach.degree) <=
                                          std::abs((tonic - 1) - approach.degree)
                                      ? tonic + 1
@@ -741,10 +750,17 @@ private:
         bool didSnap = false;   // diagnostics only (bug-4 hook)
         double snapCoinVal = 1.0;  // pass-2 input: the snap coin for this note
         if (ending) {
-            const int target = nearestDegreeWithPitchClass(
-                static_cast<int>(degree_), /*wantFifth=*/true);
+            // A phrase ending resolves to the ACTIVE harmony, not a drifting key
+            // tone: bias the step toward a chord tone of the current bar's chord
+            // (the same single rng draw as before — stream identity preserved),
+            // then land it squarely on one (deterministic, no draw). So walked
+            // phrases cadence onto root/3rd/5th of the chord they end over instead
+            // of always the key tonic/fifth. Phase 4c.
+            const int target = nearestChordToneDegree(static_cast<int>(degree_));
             degree_ = chain_.nextBiased(degree_, static_cast<float>(target),
                                         kPhraseEndBias);
+            degree_ = static_cast<std::size_t>(
+                nearestChordToneDegree(static_cast<int>(degree_)));
         } else {
             // Base motion: theory-weighted Markov, blended toward the degree the
             // cell's brightness suggests by the Image Influence amount (bias_).
