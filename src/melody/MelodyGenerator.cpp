@@ -224,6 +224,15 @@ struct PhraseNote {
     bool dbgStrong = false;   ///< was this a strong beat when generated?
     bool dbgSnapped = false;  ///< did stepNote snap it to a chord tone?
     int dbgChordRoot = -1;    ///< progression root degree the snap targeted (-1 = none)
+
+    // ---- pass-2 re-harmonisation inputs (bug 4, 4a two-pass) ----------------
+    // Recorded in pass 1 so the pass-2 re-harmonisation can decide the snap
+    // against the note's REAL emitted beat without re-running the walk (and
+    // without drawing any rng). `eligible` marks walked, non-ending notes — the
+    // only ones the snap ever touches; copied/varied/cadence/ending notes are
+    // false and are left exactly as generated.
+    double snapCoin = 1.0;   ///< the unconditional snap coin drawn in pass 1 (>=0.6 => never snaps)
+    bool eligible = false;   ///< walked non-ending note (a snap site candidate)
 };
 
 // State the phrase builder threads through generation: the grid walk position,
@@ -276,7 +285,16 @@ public:
     // real chords even when the melodic scale is pentatonic.
     void updateHarmonyTarget(double beat) {
         if (progression_.empty()) return;
-        const int bars = static_cast<int>(beat / beatsPerBar_);
+        // Quantise the beat to the tick grid before bucketing into bars, exactly
+        // as `strong` is (bug 4, 4a). A start beat accumulated through triplet
+        // (1/3) ornament durations can land a hair below an integer
+        // (e.g. 87.99999999999998); raw (int)(beat/bpb) truncation then put such
+        // a note one bar early, snapping it to the wrong chord.
+        const long tick = std::lround(beat * kTicksPerBeat);
+        const long ticksPerBar =
+            std::lround(static_cast<double>(kTicksPerBeat) * beatsPerBar_);
+        const int bars =
+            ticksPerBar > 0 ? static_cast<int>(tick / ticksPerBar) : 0;
         const int n = static_cast<int>(progression_.size());
         const int idx = ((bars % n) + n) % n;
         const int root = progression_[static_cast<std::size_t>(idx)];
@@ -525,6 +543,36 @@ public:
         return pick(rng_) == 0 ? 0.5 : 1.0;
     }
 
+    // Pass 2 of the 4a two-pass. Pass 1 (the walk + flatten above) established
+    // every note's REAL emitted start beat, including rests and ornaments; here
+    // we re-decide the strong beat and chord-tone snap against THAT beat rather
+    // than the generation-time clock, for the walked snap-site candidates only
+    // (`eligible`). Draws no rng — it reuses the pass-1 snap coin — so it moves
+    // pitches only; timing and the RNG stream are untouched. The dbg* tracks are
+    // overwritten with the real-beat verdicts so the harness scores pass 2.
+    // `strong` stays every-integer-beat (4b redefines it to bar-relative later).
+    void reharmonizeAgainstRealBeats(Melody& melody,
+                                     const std::vector<double>& snapCoin,
+                                     const std::vector<char>& eligible) {
+        const std::size_t n = melody.notes.size();
+        for (std::size_t i = 0; i < n; ++i) {
+            if (i >= eligible.size() || !eligible[i]) continue;
+            const double realBeat = melody.notes[i].startBeats;
+            updateHarmonyTarget(realBeat);  // chordPcs_/curChordRoot_ for the real bar
+            const long tick = std::lround(realBeat * kTicksPerBeat);
+            const bool strong = (tick % kTicksPerBeat) == 0;
+            const bool snapped = strong && snapCoin[i] < 0.6;
+            if (snapped) {
+                const int nd = nearestChordToneDegree(melody.degrees[i]);
+                melody.degrees[i] = nd;
+                melody.notes[i].noteNumber = scale_.noteAt(nd, options_.octaveSpan);
+            }
+            melody.dbgStrong[i] = strong ? 1 : 0;
+            melody.dbgSnapped[i] = snapped ? 1 : 0;
+            melody.dbgChordRoot[i] = snapped ? curChordRoot_ : -1;
+        }
+    }
+
 private:
     // Advances one step: moves on the grid, then chooses the next degree by
     // stepwise Markov motion nudged by the image's brightness *gradient* (so the
@@ -561,7 +609,8 @@ private:
         // chord-tone targeting outlines the moving progression, not a fixed tonic.
         updateHarmonyTarget(harmonyBeat_);
 
-        bool didSnap = false;  // diagnostics only (bug-4 hook)
+        bool didSnap = false;   // diagnostics only (bug-4 hook)
+        double snapCoinVal = 1.0;  // pass-2 input: the snap coin for this note
         if (ending) {
             const int target = nearestDegreeWithPitchClass(
                 static_cast<int>(degree_), /*wantFifth=*/true);
@@ -591,8 +640,8 @@ private:
             // attributable to logic, not to RNG re-alignment. This commit (4a-0)
             // is a one-time RNG-ordering churn only — no clock or classification
             // change. See DECISIONS / bug-4 notes.
-            const double snapCoin = uni01();
-            if (strong && snapCoin < 0.6) {
+            snapCoinVal = uni01();
+            if (strong && snapCoinVal < 0.6) {
                 next = nearestChordToneDegree(next);
                 didSnap = true;  // diagnostics only (bug-4 hook)
             }
@@ -621,6 +670,8 @@ private:
         note.dbgStrong = strong;           // diagnostics only (bug-4 hook)
         note.dbgSnapped = didSnap;         // diagnostics only
         note.dbgChordRoot = curChordRoot_; // diagnostics only
+        note.snapCoin = snapCoinVal;       // pass-2 input (bug 4, 4a)
+        note.eligible = !ending;           // walked non-ending -> a snap site candidate
         note.lengthBeats = (options_.rhythm == RhythmMode::Flowing)
                                ? nextDuration()
                                : 1.0;
@@ -800,6 +851,8 @@ Melody generatePhrased(const BrightnessGrid& grid, const Scale& scale,
                 phrase[k].dbgStrong = false;
                 phrase[k].dbgSnapped = false;
                 phrase[k].dbgChordRoot = -1;
+                phrase[k].eligible = false;  // copied notes are never re-harmonised
+                phrase[k].snapCoin = 1.0;
             }
         } else {
             phrase = builder.walkPhrase(motifLen, /*newRegion=*/true,
@@ -817,6 +870,10 @@ Melody generatePhrased(const BrightnessGrid& grid, const Scale& scale,
     // Ornament each phrase (probabilistically), then flatten into timed notes,
     // inserting rests at phrase boundaries.
     double beat = 0.0;
+    // Pass-2 inputs, parallel with melody.notes: the recorded snap coin and
+    // whether the note is a walked snap-site candidate (bug 4, 4a two-pass).
+    std::vector<double> snapCoins;
+    std::vector<char> eligible;
     for (std::size_t p = 0; p < phrases.size(); ++p) {
         const bool finalPhrase = p + 1 == phrases.size();
         // Ornament every phrase but the closing one — the cadence's final tonic
@@ -848,9 +905,17 @@ Melody generatePhrased(const BrightnessGrid& grid, const Scale& scale,
             melody.dbgStrong.push_back(pn.dbgStrong ? 1 : 0);       // diagnostics only
             melody.dbgSnapped.push_back(pn.dbgSnapped ? 1 : 0);     // diagnostics only
             melody.dbgChordRoot.push_back(pn.dbgChordRoot);         // diagnostics only
+            snapCoins.push_back(pn.snapCoin);
+            eligible.push_back(pn.eligible ? 1 : 0);
             beat += pn.lengthBeats;
         }
     }
+
+    // Pass 2 (bug 4, 4a): now that every note has its REAL emitted start beat,
+    // re-decide the strong beat and chord-tone snap against that beat instead of
+    // the generation-time clock. Draws no rng (reuses the recorded snap coin), so
+    // it changes only pitches — timing/rests/RNG stream are untouched.
+    builder.reharmonizeAgainstRealBeats(melody, snapCoins, eligible);
 
     return melody;
 }
