@@ -1,3 +1,129 @@
+# Phase 3.5 — Motif-based phrasing (the "generated-sounding" fix)
+
+Branch `feature/motif-phrasing`, off `feature/image-contour` (baseline
+`f550871`). A **deliberate re-baseline**: same-seed determinism holds, but
+output is intentionally **not** byte-identical to v1.0. Five commits + demo flag:
+
+- `2783534` two-bar syncopated rhythm templates (image-detail-aware)
+- `229565d` image density composes passing/neighbour tones, not chops
+- `4b36753` image-selected motif contour (Rise/Fall/Arch)
+- `ecaa0ff` image-fed motif variation (closes the RNG-only risk)
+- on-grid guard test + `--density` demo flag
+
+## The pre-code question (answered from the code before writing anything)
+
+**Does the image feed the motif, or only enter per-note?** Traced:
+`generateMelody -> generatePhrased -> PhraseBuilder`. Every phrased pitch comes
+from `stepNote`, which already runs the roadmap blend
+(`nextBiased(markov, mapBrightnessToDegree(brightness), imageInfluence)` +
+strong-beat chord snap). So the **motif was already image-fed** (it is a walk,
+not an RNG-picked template — the roadmap's central fear was not the state).
+The gap was at the **structural layer**: `varyMotif` was **pure RNG**
+(transpose δ, octave lift, rhythm nudge — never touched the grid), and contour
+was emergent from a random 8-neighbour walk, not selected. Phase 3.5 moved both
+onto the image:
+
+1. **Contour** (`selectContour` + contour-directed walk): walked phrases pick a
+   Rise/Fall/Arch contour from the brightness gradient at the start cell and
+   realise it by steering the grid step toward brighter/darker cells, so the
+   existing brightness->degree blend turns the image's own brightness path into
+   the melodic contour. Deterministic, so the same image gives a recognisable
+   motif shape across seeds.
+2. **Variation** (`varyMotif`): the transposition direction/size now comes from
+   the region's image-suggested degree vs the motif anchor, gated by Image
+   Influence (RNG path kept for Influence 0 and draw-stream stability).
+   Interval content is preserved, so A'/A'' stay recognisable.
+
+## Go/no-go — Phase 0 inversion experiment (the gate)
+
+Re-ran `tools/measure/measure_baseline.py`. Pre-3.5 vs post-3.5:
+
+| Metric | pre-3.5 | post-3.5 |
+|---|---|---|
+| **C** corr(brightness,pitch) infl 0.0 / 0.5 / 1.0 | +0.08 / +0.39 / +0.77 | **-0.04 / +0.54 / +0.70** |
+| **B** different images, matched colour, infl 1.0 (pch) | 0.251 | **0.422** |
+| A same image across seeds (pch, default infl) | 0.259 | 0.323 |
+
+- **Correspondence still climbs** with Image Influence — templates do **not**
+  override the image (the fail condition). ✔
+- **Different images diverge more** at high influence. ✔
+- **Same image recognisable across seeds**: probed the motif directly at
+  influence 1.0 — same-image motifs cluster (all start high ~4-5, arch/fall to
+  0) while a structurally different image (block-shuffled) yields a distinctly
+  different flat-low motif. ✔
+
+## Rhythm / density variety
+
+- Rhythm: three curated **two-bar** grooves replace the eight one-bar even-ish
+  ones — a 3-3-2 dotted-eighth syncopated push and a long-short-short answer
+  now dominate (measured: 0.75-beat dotted eighths are the most common length),
+  fixing "almost all even subdivisions" and "one-bar loops". Selection blends
+  Energy with a new mean-local-contrast image-detail scalar.
+- Density: subdivided notes are now a stepwise **passing run** toward the next
+  note (or a **neighbour** figure), not unison chops. Measured on the density-10
+  sample: only 16% of steps are unison, the rest melodic motion. Note *counts*
+  are unchanged (the subdivision-count logic is the same), so it is a like-for-
+  like "compose, don't chop" upgrade.
+
+## Rules honoured (from the build handoff)
+
+- **Same-seed determinism holds** (verified: identical MIDI on re-run);
+  byte-identical vs v1.0 **intentionally broken** (re-baseline).
+- **Timing fed pre-flatten** as `PhraseNote.lengthBeats` / note-count edits and
+  `subdivisions`. No parallel beat counter — the flatten-loop beat is still the
+  sole timeline; `barAlignedDuration` tiles the 2-bar template's own period.
+- **960 grid, safe subdivisions only**: new test `test_phrased_syncopation_on_grid`
+  checks every phrased note lands on an integer 960-tick across the Energy range;
+  the MIDI writer emits clean integer delta-times (no drift).
+
+### Anticipation status — FLAGGED, not papered over
+
+The handoff said anticipations lean on the deferred two-clock pass-2 and, if
+mistimed, to flag rather than hide it. What shipped: **syncopation** via the
+two-bar templates (off-beat 3-3-2 onsets) — these land on the grid and pass 2
+correctly treats them as weak beats (no chord-snap), so nothing is mistimed.
+**True tied anticipation across a bar line** (a note that sounds *before* a
+downbeat and sustains through it, displacing the beat) was **not** added: it
+would need a note whose length crosses the bar line against a still-per-phrase
+`strong`/`localBeat_` clock, which is exactly the deferred Phase-4 two-clock
+reconciliation. Flagging it here: when true anticipation is wanted, that is the
+signal the Phase-4 clock work stops being deferrable. Current "breathing" comes
+from syncopation + inter-phrase rests, which is sufficient and correct.
+
+## Tests / suites
+
+- Engine `LumenaTests`: **24338/24338 green** (added
+  `test_density_composes_melodic_content`, `test_phrased_syncopation_on_grid`).
+- Parent `lumen_tests` (build-linux): green **except** the pre-existing
+  `wavetable SHA-256 matches the pinned reference` (Lens golden pinned on the
+  Windows toolchain; Linux FP differs — untouched, unrelated). The four
+  **Melody Density wiring** tests pass, so the passing-tone density rework
+  satisfies the plugin bridge unchanged.
+
+## Samples
+
+`samples/phase3-density/density-{00,05,10}.mid` regenerated on the new engine
+(seed 2024, `samples/phase3-density/checkerboard.png` = A-minor-pentatonic
+high-contrast, 110 BPM, 8 bars, `--length 32 --loop-bars 8`, density 0/0.5/1.0).
+Counts 37 / 103 / 136 (unchanged from Phase 3), but the density fill is now
+melodic passing/neighbour tones. Command:
+`lumena_demo checkerboard.png --seed 2024 --tempo 110 --mode phrased --length 32 --loop-bars 8 --density <d> --out <f>`.
+WAV/MP3 still needs a soundfont on your end.
+
+## Where the next session picks up
+
+- **Audition by ear** (the last gate item that needs you): do the three density
+  clips read as melodic hooks now, and does the motif recur recognisably?
+- Bump the parent `external/lumena` pointer to this branch's HEAD and land the
+  re-baseline as an isolated parent commit.
+- True tied-anticipation + the `localBeat_`/`harmonyBeat_` two-clock unify
+  remain Phase 4 (see anticipation flag above).
+- Contour is currently three shapes selected by a single start-cell gradient; a
+  richer region-scan selection (and per-phrase contrast between A and B) is a
+  reasonable future refinement.
+
+---
+
 # Follow-on task — dynamics smoothing (anti-whiplash)
 
 *Separate from Phase 3 (which is done/accepted). Velocity/dynamics only — no
