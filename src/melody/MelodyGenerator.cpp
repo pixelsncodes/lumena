@@ -435,9 +435,27 @@ public:
             hi = std::max(hi, n.degree);
         }
 
+        // Image-fed transposition (Phase 3.5): the variation direction and size
+        // come from the image blend, not from RNG alone — the risk this phase
+        // exists to close. Compare the degree the builder's current region
+        // suggests to the motif's anchor: a brighter region shifts the repeat
+        // up, a darker one down (§10, §7.3 "move up a scale degree"). The RNG
+        // delta is still drawn (so Image Influence 0 keeps the original musical
+        // variation and the draw stream stays stable), and Image Influence
+        // chooses between the image-led and the random shift. Transposition
+        // preserves interval content either way, so A'/A'' stay recognisable.
+        const int anchor = v.front().degree;
+        const float regionBright = grid_.valueAt(col_, row_);
+        const int imageDeg = mapBrightnessToDegree(regionBright, totalDegrees_);
+        int deltaImage = imageDeg - anchor;
+        if (deltaImage > 2) deltaImage = 2;
+        if (deltaImage < -2) deltaImage = -2;
+        if (deltaImage == 0) deltaImage = regionBright >= 0.5f ? 1 : -1;  // still move
+
         static constexpr int kDeltas[4] = {-2, -1, 1, 2};
         std::uniform_int_distribution<int> pick(0, 3);
-        int delta = kDeltas[pick(rng_)];
+        const int deltaRandom = kDeltas[pick(rng_)];
+        int delta = (uni01() < static_cast<double>(bias_)) ? deltaImage : deltaRandom;
         // Shrink the shift toward 0 until the whole motif fits in range.
         while (delta != 0 && (lo + delta < 0 || hi + delta >= totalDegrees_)) {
             delta += (delta > 0) ? -1 : 1;
