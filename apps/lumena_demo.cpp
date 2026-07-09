@@ -138,6 +138,12 @@ struct CoherenceMetrics {
     double m3Front = -1.0;
     double m3Back = -1.0;
     double m3Delta = 0.0;
+    // Supplementary register decomposition (S-4 diagnostic): mean |phrase pitch
+    // centroid - motif A's centroid| in semitones, split by phrase role. Reads
+    // the register relatedness C-1 targets directly, without M2's front-band
+    // artifact (the band itself contains an early B phrase).
+    double regAPrime = -1.0;
+    double regB = -1.0;
     int bars = 0;
 };
 
@@ -210,13 +216,34 @@ CoherenceMetrics computeCoherenceMetrics(const Melody& melody,
         }
         double aSum = 0.0, bSum = 0.0;
         int aN = 0, bN = 0;
+        // Per-phrase pitch centroids for the register decomposition.
+        std::vector<double> phraseCentroid(starts.size(), -1.0);
+        for (std::size_t p = 0; p < starts.size(); ++p) {
+            const std::size_t begin = starts[p];
+            const std::size_t end =
+                p + 1 < starts.size() ? starts[p + 1] : notes.size();
+            if (end <= begin) continue;
+            double sum = 0.0;
+            for (std::size_t i = begin; i < end; ++i)
+                sum += notes[i].noteNumber;
+            phraseCentroid[p] = sum / static_cast<double>(end - begin);
+        }
+        double aReg = 0.0, bReg = 0.0;
+        int aRegN = 0, bRegN = 0;
         for (std::size_t p = 1; p + 1 < starts.size(); ++p) {
             const double d = normalizedEditDistance(phraseSyms[0], phraseSyms[p]);
             if (p % 2 == 1) { aSum += d; ++aN; }
             else            { bSum += d; ++bN; }
+            if (phraseCentroid[p] >= 0.0 && phraseCentroid[0] >= 0.0) {
+                const double rd = std::fabs(phraseCentroid[p] - phraseCentroid[0]);
+                if (p % 2 == 1) { aReg += rd; ++aRegN; }
+                else            { bReg += rd; ++bRegN; }
+            }
         }
         if (aN > 0) m.m1APrime = aSum / aN;
         if (bN > 0) m.m1B = bSum / bN;
+        if (aRegN > 0) m.regAPrime = aReg / aRegN;
+        if (bRegN > 0) m.regB = bReg / bRegN;
     }
 
     // M2: front-half centroid band, max back-half excursion outside it.
@@ -260,13 +287,15 @@ CoherenceMetrics computeCoherenceMetrics(const Melody& melody,
 
 const char* kMetricsCsvHeader =
     "seed,notes,bars,m1_front,m1_back,m1_aprime,m1_b,"
-    "m2_excursion,m3_front,m3_back,m3_delta\n";
+    "m2_excursion,m3_front,m3_back,m3_delta,reg_aprime,reg_b\n";
 
 void writeMetricsCsvRow(std::FILE* f, unsigned seed, std::size_t noteCount,
                         const CoherenceMetrics& m) {
-    std::fprintf(f, "%u,%zu,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n", seed,
-                 noteCount, m.bars, m.m1Front, m.m1Back, m.m1APrime, m.m1B,
-                 m.m2Excursion, m.m3Front, m.m3Back, m.m3Delta);
+    std::fprintf(f,
+                 "%u,%zu,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n",
+                 seed, noteCount, m.bars, m.m1Front, m.m1Back, m.m1APrime,
+                 m.m1B, m.m2Excursion, m.m3Front, m.m3Back, m.m3Delta,
+                 m.regAPrime, m.regB);
 }
 
 void printUsage(const char* argv0) {
