@@ -39,6 +39,66 @@ controller — never from `generateMelody` or `lumena_demo` — so generation ou
 is unaffected by construction. Verified: checkerboard phrased seed 2024
 byte-identical on re-run. Engine suite **24426/24426 green** (was 24389).
 
+## Commit 2 — Lock Harmony (progression promoted to a lockable input)
+
+Per the trace's determinism-safe path: the chord progression becomes an explicit
+**input** instead of an RNG **output**.
+
+- **`MelodyOptions::progression`** (new, empty by default). Empty ⇒ draw one
+  template exactly as before (byte-identical); non-empty ⇒ voice those roots and
+  draw **no** RNG for the progression. `progressionRoots` was refactored into
+  `pickProgressionBase` (the single `pick(rng)` draw) + `tileProgression` (rng-
+  free) + `pickOrDrawProgression` (input-or-draw), wired into all three call
+  sites (phrased ctor, arp, chords). The old `progressionRoots` wrapper is gone.
+- **`Melody::progression`** (new carrier): every mode (except Freeform, which has
+  no harmony) records the base progression it voiced, so a caller can carry it
+  forward.
+- **`RegenLocks::harmony`** + **`melodyLockHarmony`** param (parent), read in
+  `locksFromParams`. `MelodyController` keeps `currentProgression` (in-memory)
+  and, on `regenerate()` with Lock Harmony on, feeds it back through `renderFresh`
+  so pitch/rhythm re-roll under a fixed progression. **No UI** (parked to Phase 5)
+  — param + engine only. Param appended last (no automation-index shift); no
+  `kStateVersion` bump, matching the sibling `melodyLock{Rhythm,Pitch}` precedent
+  (added at v3 without a bump; inert bool, backward-compatible).
+
+**Known limitation (reversible, noted not fixed):** `currentProgression` is
+session-memory only — not persisted in plugin state. After a reload, the first
+Regenerate with Lock Harmony on draws a fresh progression until a generation
+re-seeds the carrier. Persisting it needs a state-schema slot (a `kStateVersion`
+bump + migration); deferred as a small follow-up to avoid scope creep here.
+
+**Determinism proof:** with no progression supplied, checkerboard seed 2024 is
+**byte-identical** to the prior commit across ALL four modes (phrased / freeform /
+chords / arp), built from a worktree at the prior tip. The refactor is
+byte-neutral.
+
+**Tests.** Engine: `test_lock_harmony_carries_progression` (a generation records
+its progression; feeding it back pins the harmony across a new seed while notes
+re-roll; same seed+progression ⇒ byte-identical; two different progressions at
+the same seed ⇒ different notes, so the input is honoured). Parent:
+`MelodyLockHarmonyWiringTest` (the `melodyLockHarmony` param, driven through the
+real controller, holds the progression across `regenerate()` while notes change).
+Engine suite **24432/24432 green**; parent green except the pre-existing
+wavetable SHA-256 golden (untouched).
+
+## Demo flags + samples — `samples/phase4b-locks/`
+
+`lumena_demo` gained default-off flags (default output unchanged, re-verified
+byte-identical): `--progression a,b,c,d` (Lock Harmony), `--regen-seed N` +
+`--lock rhythm|pitch` (splice via `recombineLocked`), `--mutate AMOUNT
+[--mutate-seed N]`. Mona Lisa (audition, C Minor), 8 bars, 110 BPM:
+
+| File | Demonstrates |
+|---|---|
+| `base.mid` | fresh phrased melody, seed 2024 (37 notes) |
+| `lock-rhythm_new-pitch.mid` | Lock Rhythm vs seed 4242: timing identical to base, all 37 pitches new |
+| `lock-pitch_new-rhythm.mid` | Lock Pitch vs seed 4242: base pitches, candidate's timing (35 notes) |
+| `harmony-locked_seedA/B.mid` | same progression I-V-vi-IV, seeds 2024/4242 — harmony fixed, notes re-rolled |
+| `mutate-before.mid` / `mutate-after.mid` | base vs a 0.30 mutation (seed 7) |
+
+Determinism: the lock-rhythm splice on the **checkerboard** re-runs byte-identical
+(`determ-ck-lockrhythm.mid`). WAV/MP3 still needs a soundfont on your end.
+
 ---
 
 # Phase 4a — Scale-aware chords & arps

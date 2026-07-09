@@ -148,8 +148,12 @@ constexpr int kMajorSteps[7] = {0, 2, 4, 5, 7, 9, 11};
 constexpr int kMinorSteps[7] = {0, 2, 3, 5, 7, 8, 10};
 
 // A session-locked named pop progression (I/IV/V/vi), tiled to `count` chords.
-// Defined below; forward-declared so the phrased melody can target it too.
-std::vector<int> progressionRoots(int count, std::mt19937& rng);
+// Resolves from an explicit input (Lock Harmony, no rng) or a fresh draw,
+// returning the tiled roots and the 4-degree base. Defined below; forward-
+// declared so the phrased melody's builder can target it too.
+std::vector<int> pickOrDrawProgression(const MelodyOptions& options,
+                                       std::mt19937& rng, int count,
+                                       std::vector<int>& outBase);
 
 // Brightness range (detail/edges) in the 8-neighbour window around a cell.
 // Defined below; forward-declared so the phrase builder can average it into an
@@ -305,7 +309,10 @@ public:
         tonicPc_ = tonicPc;
         progMajor_ = hasM3 && ! hasm3;
         beatsPerBar_ = options.beatsPerBar > 0.0 ? options.beatsPerBar : 4.0;
-        progression_ = progressionRoots(4, rng);
+        // Harmony as a lockable input: an explicit progression draws no rng (Lock
+        // Harmony), an empty one draws one template exactly as before 4b. The base
+        // (any length) IS progression_; updateHarmonyTarget tiles it per bar.
+        pickOrDrawProgression(options, rng, 4, progression_);
         updateHarmonyTarget(0.0);  // start on the progression's first chord
         imageDetail_ = computeImageDetail();  // busy/edgy image -> busier groove
         pickRhythmTemplate();      // lock one groove for the session
@@ -636,6 +643,10 @@ public:
     // The session's one groove (durations summing to a bar). The flatten loop
     // tiles this to the real bar line to emit each templated note's duration.
     const std::vector<double>& rhythmTemplate() const { return rhythmTemplate_; }
+
+    // The chord progression base this phrase builder voiced over, for carry-
+    // forward onto Melody::progression (Lock Harmony).
+    const std::vector<int>& progression() const { return progression_; }
 
     // Pass 2 of the 4a two-pass. Pass 1 (the walk + flatten above) established
     // every note's REAL emitted start beat, including rests and ornaments; here
@@ -1273,6 +1284,7 @@ Melody generatePhrased(const BrightnessGrid& grid, const Scale& scale,
     // it changes only pitches — timing/rests/RNG stream are untouched.
     builder.reharmonizeAgainstRealBeats(melody, snapCoins, eligible);
 
+    melody.progression = builder.progression();  // carry harmony for Lock Harmony
     return melody;
 }
 
@@ -1474,21 +1486,42 @@ const std::vector<ProgressionTemplate>& progressionTemplates() {
     return kTemplates;
 }
 
-// Picks one progression for the whole session and tiles it to `count` chords.
-// Session-locked: a fixed seed selects the same template every time, so the
-// harmony has a stable identity rather than a fresh random walk each bar.
-std::vector<int> progressionRoots(int count, std::mt19937& rng) {
+// Draws ONE progression template and returns its 4 base degrees (the harmonic
+// identity for the session). This single `pick(rng)` is the only RNG the harmony
+// consumes; splitting the pick from the tiling lets the base be captured (to
+// store on the Melody and carry forward for Lock Harmony) and lets an explicit
+// input skip the draw — see pickOrDrawProgression / MelodyOptions::progression.
+std::vector<int> pickProgressionBase(std::mt19937& rng) {
     const auto& templates = progressionTemplates();
     std::uniform_int_distribution<std::size_t> pick(0, templates.size() - 1);
     const int* prog = templates[pick(rng)].degrees;
+    return {prog[0], prog[1], prog[2], prog[3]};
+}
+
+// Tiles a base progression to `count` chords (one per bar), cycling the base.
+std::vector<int> tileProgression(const std::vector<int>& base, int count) {
     const int n = std::max(1, count);
     std::vector<int> roots;
+    if (base.empty()) return roots;
     roots.reserve(static_cast<std::size_t>(n));
     for (int c = 0; c < n; ++c) {
-        roots.push_back(prog[c % 4]);
+        roots.push_back(base[static_cast<std::size_t>(c) % base.size()]);
     }
     return roots;
 }
+
+// The session's chord identity for this generation: the explicit
+// `options.progression` when supplied (Lock Harmony — draws NO rng), else a
+// fresh drawn template (byte-identical to the pre-4b draw). `outBase` receives
+// the 4-degree base so callers can store it on the Melody for carry-forward.
+std::vector<int> pickOrDrawProgression(const MelodyOptions& options,
+                                       std::mt19937& rng, int count,
+                                       std::vector<int>& outBase) {
+    outBase = options.progression.empty() ? pickProgressionBase(rng)
+                                          : options.progression;
+    return tileProgression(outBase, count);
+}
+
 
 // Register the chords/arp are voiced from. MUST be a multiple of 12 so that
 // note%12 == (tonicPc + scaleStep)%12 and the harmony stays in the detected key.
@@ -1531,8 +1564,11 @@ Melody generateArpeggiated(const BrightnessGrid& grid, const Scale& scale,
         bars = std::max(1, (length + notesPerBar - 1) / notesPerBar);
     }
 
-    // One chord per bar.
-    const std::vector<int> roots = progressionRoots(bars, rng);
+    // One chord per bar. Harmony is a lockable input (Lock Harmony): an explicit
+    // progression draws no rng, an empty one draws exactly as before 4b.
+    std::vector<int> progBase;
+    const std::vector<int> roots = pickOrDrawProgression(options, rng, bars, progBase);
+    melody.progression = progBase;
 
     const int cols = grid.columns();
     const int rows = grid.rows();
@@ -1671,7 +1707,11 @@ Melody generateChords(const BrightnessGrid& grid, const Scale& scale,
     // Progression, then impose a V–I cadence at the end so the loop resolves.
     // A named pop progression, session-locked and tiled to fill the bars. The
     // template is a self-resolving loop, so no separate V–I is imposed here.
-    std::vector<int> roots = progressionRoots(chords, rng);
+    // Harmony is a lockable input (Lock Harmony): explicit -> no rng draw; empty
+    // -> drawn exactly as before 4b.
+    std::vector<int> progBase;
+    std::vector<int> roots = pickOrDrawProgression(options, rng, chords, progBase);
+    melody.progression = progBase;
 
     // Smooth voice-leading: choose the inversion whose top note is closest to the
     // previous chord's top note.

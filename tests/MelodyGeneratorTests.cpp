@@ -1591,6 +1591,51 @@ void test_splice_count_matches_and_holds_last() {
     CHECK(lr2.notes[2].noteNumber == 72);
 }
 
+// ---- Phase 4b: Lock Harmony (progression as a lockable input) ---------------
+// A fresh generation records its chosen progression on Melody::progression.
+// Feeding that back via MelodyOptions::progression pins the harmony across a
+// re-generation (any seed) while pitch/rhythm re-roll; supplying the input draws
+// no RNG for the progression and actually steers the melody (chord snaps), so it
+// is not ignored. Determinism holds given a fixed seed + fixed progression.
+void test_lock_harmony_carries_progression() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = minorPentatonic();
+
+    MelodyOptions o;
+    o.length = 32;
+    o.loopBars = 8;
+
+    std::mt19937 a(2024u);
+    const Melody base = generateMelody(grid, scale, o, a);
+    CHECK(!base.progression.empty());  // harmony identity recorded
+
+    // Carry it forward with a DIFFERENT seed: progression identical, notes re-roll.
+    MelodyOptions locked = o;
+    locked.progression = base.progression;
+    std::mt19937 b(777u);
+    const Melody regen = generateMelody(grid, scale, locked, b);
+    CHECK(regen.progression == base.progression);   // harmony pinned across regen
+
+    // Determinism: same seed + same explicit progression -> byte-identical.
+    std::mt19937 c1(777u), c2(777u);
+    const Melody r1 = generateMelody(grid, scale, locked, c1);
+    const Melody r2 = generateMelody(grid, scale, locked, c2);
+    CHECK(melodyNotesIdentical(r1, r2));
+
+    // The input is honoured, not ignored: SAME seed, two different progressions
+    // produce different harmony and different notes (chord snaps follow it).
+    MelodyOptions progX = o, progY = o;
+    progX.progression = {0, 3, 4, 5};   // I-IV-V-vi
+    progY.progression = {5, 3, 0, 4};   // vi-IV-I-V
+    std::mt19937 x(4u), y(4u);
+    const Melody mx = generateMelody(grid, scale, progX, x);
+    const Melody my = generateMelody(grid, scale, progY, y);
+    CHECK(mx.progression == progX.progression);
+    CHECK(my.progression == progY.progression);
+    CHECK(!melodyNotesIdentical(mx, my));
+}
+
 // Mirrors the strong-beat predicate at MelodyGenerator.cpp:537: a beat position
 // is strong iff it lands exactly on an integer beat on the tick grid. Verifies
 // the integer test classifies integer beats as strong and half-beats as weak on
@@ -1660,4 +1705,5 @@ void run_melody_generator_tests() {
     test_mutate_respects_locks();
     test_splice_locks_deterministic();
     test_splice_count_matches_and_holds_last();
+    test_lock_harmony_carries_progression();
 }

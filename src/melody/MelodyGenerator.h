@@ -155,6 +155,16 @@ struct MelodyOptions {
     /// Defaults off so existing output and the RNG draw stream are unchanged;
     /// the plugin will surface it as a "Density" / "Image Rhythm" control.
     double imageRhythmAmount = 0.0;
+
+    /// Explicit chord progression to voice, as diatonic root degrees (0 = I,
+    /// 3 = IV, 4 = V, 5 = vi; the 4-degree base is tiled to the needed length).
+    /// EMPTY (the default) means "pick one at random from the seed" — exactly the
+    /// pre-4b behaviour, drawing one RNG value and leaving every existing baseline
+    /// byte-identical. When NON-empty the generator consumes NO RNG for the
+    /// progression and voices these roots instead: this backs "Lock Harmony",
+    /// where the previous run's progression (carried on `Melody::progression`) is
+    /// fed back so pitch/rhythm re-roll under a fixed harmony. Phase 4b.
+    std::vector<int> progression;
 };
 
 /// The lowest and highest MIDI velocity brightness maps onto.
@@ -225,6 +235,14 @@ struct Melody {
     std::vector<int> dbgStrong;
     std::vector<int> dbgSnapped;
     std::vector<int> dbgChordRoot;
+
+    /// The chord progression base this melody was voiced over, as diatonic root
+    /// degrees (0 = I, 3 = IV, 4 = V, 5 = vi) — the harmonic identity chosen at
+    /// generation time. Populated in Phrased, Arpeggio and Chords modes; empty in
+    /// Freeform (a flat Markov walk with no chord backbone) and for an empty
+    /// melody. Lets a caller carry the harmony forward into a re-generation via
+    /// `MelodyOptions::progression` — the mechanism behind "Lock Harmony" (4b).
+    std::vector<int> progression;
 };
 
 /// Runs the full melody walk: a theory-weighted Markov chain over scale degrees,
@@ -252,6 +270,7 @@ Melody generateMelody(const image::BrightnessGrid& grid,
 struct RegenLocks {
     bool rhythm = false;  ///< Keep each note's start/length (the timing track).
     bool pitch = false;   ///< Keep each note's pitch/degree (the melodic track).
+    bool harmony = false; ///< Keep the chord progression (fed via MelodyOptions).
 };
 
 /// Combines a `previous` melody with a freshly generated `candidate`, taking the

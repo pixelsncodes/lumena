@@ -50,6 +50,12 @@ struct Options {
     unsigned      seed  = 20260707u;
     double        tempo = 120.0;
     MelodyOptions melody;       // rhythm/cells/length/bias default to musical values
+    // Phase 4b lock demos (all default off, so plain `--seed X` is unchanged):
+    bool          lockRhythm = false;   // splice: keep the base timing track
+    bool          lockPitch  = false;   // splice: keep the base pitch track
+    long          regenSeed  = -1;      // >=0: recombineLocked against this seed
+    double        mutateAmount = -1.0;  // >=0: mutate the result by this amount
+    unsigned      mutateSeed = 1u;      // seed for the mutation draws
 };
 
 void printUsage(const char* argv0) {
@@ -152,6 +158,30 @@ bool parseArgs(int argc, char** argv, Options& opts) {
         } else if (arg == "--loop-bars" && i + 1 < argc) {
             opts.melody.loopBars =
                 static_cast<int>(std::strtol(argv[++i], nullptr, 10));
+        } else if (arg == "--progression" && i + 1 < argc) {
+            // Explicit chord progression (Lock Harmony): comma-separated diatonic
+            // root degrees, e.g. "0,4,5,3" for I-V-vi-IV. Same list + different
+            // --seed => same harmony, re-rolled pitch/rhythm.
+            opts.melody.progression.clear();
+            const char* p = argv[++i];
+            while (*p) {
+                char* end = nullptr;
+                const long v = std::strtol(p, &end, 10);
+                if (end == p) break;
+                opts.melody.progression.push_back(static_cast<int>(v));
+                p = (*end == ',') ? end + 1 : end;
+            }
+        } else if (arg == "--lock" && i + 1 < argc) {
+            const std::string d = argv[++i];
+            if (d == "rhythm") opts.lockRhythm = true;
+            else if (d == "pitch") opts.lockPitch = true;
+            else { std::fprintf(stderr, "Unknown --lock: %s\n", d.c_str()); return false; }
+        } else if (arg == "--regen-seed" && i + 1 < argc) {
+            opts.regenSeed = std::strtol(argv[++i], nullptr, 10);
+        } else if (arg == "--mutate" && i + 1 < argc) {
+            opts.mutateAmount = std::strtod(argv[++i], nullptr);
+        } else if (arg == "--mutate-seed" && i + 1 < argc) {
+            opts.mutateSeed = static_cast<unsigned>(std::strtoul(argv[++i], nullptr, 10));
         } else if (arg == "-h" || arg == "--help") {
             return false;
         } else if (!arg.empty() && arg[0] == '-') {
@@ -193,8 +223,35 @@ int main(int argc, char** argv) {
                 detection.keyName.c_str(), detection.hue, detection.saturation);
 
     std::mt19937 rng(opts.seed);
-    const Melody melody =
+    Melody melody =
         lumena::melody::generateMelody(grid, detection.scale, opts.melody, rng);
+
+    // Phase 4b splice locks: regenerate a candidate under a second seed and keep
+    // the locked track from the first melody (Lock Rhythm -> new pitches, etc.).
+    if (opts.regenSeed >= 0 && (opts.lockRhythm || opts.lockPitch)) {
+        std::mt19937 rng2(static_cast<unsigned>(opts.regenSeed));
+        const Melody cand =
+            lumena::melody::generateMelody(grid, detection.scale, opts.melody, rng2);
+        lumena::melody::RegenLocks locks;
+        locks.rhythm = opts.lockRhythm;
+        locks.pitch = opts.lockPitch;
+        melody = lumena::melody::recombineLocked(melody, cand, detection.scale,
+                                                 locks, opts.melody);
+        std::printf("Recombined: lock %s against seed %ld\n",
+                    opts.lockRhythm ? "rhythm" : "pitch", opts.regenSeed);
+    }
+
+    // Phase 4b mutate: nudge the result (honouring any lock) for a variation.
+    if (opts.mutateAmount >= 0.0) {
+        std::mt19937 mrng(opts.mutateSeed);
+        lumena::melody::RegenLocks locks;
+        locks.rhythm = opts.lockRhythm;
+        locks.pitch = opts.lockPitch;
+        melody = lumena::melody::mutate(melody, detection.scale, locks,
+                                        opts.mutateAmount, opts.melody, mrng);
+        std::printf("Mutated by %.2f (seed %u)\n", opts.mutateAmount, opts.mutateSeed);
+    }
+
     const std::vector<Note>& notes = melody.notes;
     const char* structure =
         opts.melody.mode == GenerationMode::Arpeggio
