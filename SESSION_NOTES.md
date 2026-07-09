@@ -110,6 +110,18 @@ melodic passing/neighbour tones. Command:
 `lumena_demo checkerboard.png --seed 2024 --tempo 110 --mode phrased --length 32 --loop-bars 8 --density <d> --out <f>`.
 WAV/MP3 still needs a soundfont on your end.
 
+**Two fixtures, two jobs.** Density *auditions* live on a graded natural image —
+`samples/phase3-density/Mona_Lisa.jpg` (detected C Minor) —
+`mona-density-{015,025,035,050}.mid` at density 0.15/0.25/0.35/0.50, same seed
+2024 / 8 bars. On a graded image the low end is genuinely distinct (37 / 38 / 51
+/ 56 notes, all pairwise byte-distinct) because local contrast varies across the
+canvas, so each density step subdivides progressively more regions. The
+*checkerboard* stays the **determinism/regression fixture** (uniform max
+contrast → integer subdivision steps → exact, reproducible note counts the tests
+pin); it is a poor audition image precisely because that uniformity quantises the
+low end (0.15 ≡ baseline, 0.25 ≡ 0.35). Keep them separate: the checkerboard
+proves the maths, the Mona Lisa shows the feel.
+
 ## Where the next session picks up
 
 - **Audition by ear** (the last gate item that needs you): do the three density
