@@ -476,6 +476,14 @@ public:
         std::uniform_int_distribution<int> pick(0, 3);
         const int deltaRandom = kDeltas[pick(rng_)];
         int delta = (uni01() < static_cast<double>(bias_)) ? deltaImage : deltaRandom;
+        // Variant B (register-rein): tighten the APPLIED transpose band to +/-1
+        // scale degree so A''/A''' stop scattering the register. Both draws above
+        // (pick :477, uni01 :478) are preserved verbatim — this is a post-draw
+        // clamp of the already-drawn value (no new draw, no reorder). The sign
+        // (the variation's direction/contour intent) is untouched; only the
+        // magnitude is reined.
+        if (delta > 1) delta = 1;
+        if (delta < -1) delta = -1;
         // Shrink the shift toward 0 until the whole motif fits in range.
         while (delta != 0 && (lo + delta < 0 || hi + delta >= totalDegrees_)) {
             delta += (delta > 0) ? -1 : 1;
@@ -490,7 +498,16 @@ public:
         // shifting every note by an octave preserves the motif's interval
         // content, so A'/A'' stays recognisable.
         std::uniform_real_distribution<double> lift(0.0, 1.0);
-        if (lift(rng_) < kOctaveLiftProbability) {
+        // Draw preserved verbatim (site :493) — the roll always consumes exactly
+        // one draw, whatever we decide to do with it.
+        const bool liftRolled = lift(rng_) < kOctaveLiftProbability;
+        // Variant B (register-rein): honour the roll, but never stack two lifts in
+        // a row. Each varyMotif call starts from motif A's home register, so a
+        // single applied lift is exactly one octave from home — cumulative octave
+        // displacement never exceeds +/-1 octave. Blocking consecutive lifts stops
+        // the whole back half of the melody from sitting an octave up.
+        bool liftedThisVariation = false;
+        if (liftRolled && !octaveLiftedLastVariation_) {
             int hi2 = std::numeric_limits<int>::min();
             for (const PhraseNote& n : v) hi2 = std::max(hi2, n.degree);
             if (hi2 + degreesPerOctave_ < totalDegrees_) {
@@ -498,8 +515,10 @@ public:
                     n.degree += degreesPerOctave_;
                     n.noteNumber = scale_.noteAt(n.degree, options_.octaveSpan);
                 }
+                liftedThisVariation = true;
             }
         }
+        octaveLiftedLastVariation_ = liftedThisVariation;
 
         // Slight rhythmic variation: retime one note to a neighbouring length.
         if (options_.rhythm == RhythmMode::Flowing) {
@@ -1032,6 +1051,10 @@ private:
     std::size_t rhythmCursor_ = 0;
     // Mean grid local contrast (image detail), in [0,1]; steers template choice.
     double imageDetail_ = 0.0;
+    // Variant B (register-rein): whether the previous varyMotif call actually
+    // applied the octave lift, so consecutive lifts don't stack the whole back
+    // half of the melody an octave up. Reset per generation (fresh builder).
+    bool octaveLiftedLastVariation_ = false;
 };
 
 // The emitted duration of a templated note starting at `startBeat`: the beats
