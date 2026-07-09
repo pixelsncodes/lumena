@@ -67,6 +67,19 @@ note is >= 1.5 beats). Engine **22412/22412 green** (the check total drops vs
 Commit 1 because density-on melodies now emit fewer subdivided notes, not because
 any assertion was skipped). Parent green except the pre-existing wavetable golden.
 
+## Samples — `samples/phase4c-cadences/` (parent repo)
+
+Phrased, 8 bars, 100 BPM. Auditions:
+- `mona-cadence.mid` — Mona Lisa (C Minor, no leading tone): chord-tone phrase
+  endings + the settle, seed 2024 (37 notes).
+- `harmonic-minor-cadence.mid` (+ `harmonic-minor-fixture.png`, a synthesised
+  vivid very-dark image that detects **C Harmonic Minor**) — **seed 2**, chosen
+  so the closing cadence audibly resolves **B → C through the leading tone** with
+  a long final tonic (35 notes). The leading-tone approach fires whenever the
+  cadence tonic isn't at the very bottom of the range (~half of seeds).
+- `determ-checkerboard.mid` — determinism proof (checkerboard, seed 2024); same-
+  seed re-run byte-identical. WAV/MP3 still needs a soundfont on your end.
+
 ---
 
 # Phase 4b — Locks + regeneration (post-hoc splice model)
