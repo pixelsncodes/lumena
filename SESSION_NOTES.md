@@ -1,3 +1,32 @@
+# Phase 4 tail — B-phrase pass · Variant B raw per-note diff (read-only)
+
+Direct MIDI note dump of the two audition renders (both hashes verified:
+baseline `599b674d…`, variant `77018a89…`). Both files are a **single melody track**
+(no accompaniment track in this phrased render), 37 notes each, PPQ 480.
+
+**Canary CONFIRMED (STEP-0 claim holds exactly):** 37 notes each · onsets
+**byte-identical** · durations **byte-identical** · **exactly 5 pitches changed, all
+DOWN 1–2 semitones**. No onset/duration difference anywhere. The 5 changes are one
+contiguous run — a single reined varyMotif phrase (bar 4, beats 13.0–17.0):
+
+| idx | onset | old → new | Δ |
+|---|---|---|---|
+| 15 | 13.00b | F5 (77) → D#5 (75) | −2 |
+| 16 | 13.50b | G5 (79) → F5 (77) | −2 |
+| 17 | 14.00b | D#4 (63) → D4 (62) | −1 |
+| 18 | 14.75b | D#4 (63) → D4 (62) | −1 |
+| 19 | 15.50b | D#4 (63) → D4 (62) | −1 |
+
+(Consistent with the transpose band tightening ±2→±1: this phrase's applied shift
+dropped one degree, pulling the whole run down toward home register.)
+
+**Velocities byte-identical** (raw sequence matches note-for-note across all 37):
+`[61,73,85,86,74,61,72,84,90,78,61,73,85,90,78,61,73,85,86,74,70,80,91,101,105,93,81,61,73,85,89,77,56,66,76,84,72]`.
+On seed 2024 the pitch changes did NOT trip the maybeOrnament coupling, so the RNG
+stream stayed aligned and dynamics are unchanged — the diff is purely those 5 pitches.
+
+---
+
 # Phase 4 tail — B-phrase pass · VARIANT B (register-rein) · AUDITION BRANCH
 
 Branch `feature/bphrase-register-rein` off tip `a9852a5`. **Audition only — DO NOT
