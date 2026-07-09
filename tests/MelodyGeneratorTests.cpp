@@ -103,6 +103,26 @@ Scale dHarmonicMinor() {
     return Scale{"D Harmonic Minor", 62, {0, 2, 3, 5, 7, 8, 11}};
 }
 
+// A Blues (minor blues): minor pentatonic plus the ♭5 blue note (interval 6).
+// Root A = MIDI 57 (pitch class 9). Its ♭7 is G (pitch class (9 + 10) % 12 == 7).
+// Because it is a 6-note scale it drops through diatonicChord's non-7-degree
+// fallback, which spells a plain minor triad and silently loses the ♭7. Phase 4a
+// makes the arp voice a real minor-7th (A-C-E-G) so the blue ♭7 sounds, every
+// tone staying inside the parent A-minor key.
+Scale aBlues() {
+    return Scale{"A Blues", 57, {0, 3, 5, 6, 7, 10}};
+}
+
+// A flat mid-grey image: every cell reads ~0.5, safely below the arp's
+// brightness>0.82 octave-jump threshold, so the emitted pitches are exactly the
+// arp cycle with no image-driven octave lifts — lets a test read the raw figure.
+Image makeGrey(int width, int height) {
+    std::vector<std::uint8_t> pixels(
+        static_cast<std::size_t>(width) * height * 4, 128);
+    for (std::size_t i = 3; i < pixels.size(); i += 4) pixels[i] = 255;  // alpha
+    return Image(width, height, std::move(pixels));
+}
+
 // The scale-degree deltas within a phrase [begin, end) of the degree track.
 // Transposing a motif preserves these, so two phrases sharing a delta signature
 // are the same motif (possibly transposed).
@@ -1029,6 +1049,74 @@ void test_arpeggio_spells_harmonic_minor_leading_tone() {
     CHECK(pcs.count(leadingTonePc) == 1);
 }
 
+// ---- Phase 4a: scale-aware arps --------------------------------------------
+// Blues is a 6-note scale, so it falls through diatonicChord's non-7-degree
+// fallback which spells a plain minor triad and drops the ♭7 blue note. The arp
+// must instead voice a real minor-7th (root-♭3-5-♭7) so the ♭7 sounds. The
+// seventh is recorded as chord-tone role 3 (0=root,1=third,2=fifth,3=seventh),
+// which a triad-only arp never produces; and every emitted tone must stay inside
+// the parent minor key (no chromatic tone introduced to "complete" the chord).
+void test_arpeggio_blues_spells_in_scale_seventh() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = aBlues();
+
+    MelodyOptions o;
+    o.mode = lumena::melody::GenerationMode::Arpeggio;
+    o.arpPattern = ArpPattern::Up;
+    o.arpOctaves = 2;
+    o.arpRate = 0.5;
+    o.loopBars = 4;      // one full progression cycle: every chord degree renders
+    std::mt19937 rng(11u);
+    const Melody m = generateMelody(grid, scale, o, rng);
+
+    // A seventh (role 3) is spelled somewhere — the blue ♭7 sounds.
+    bool sawSeventh = false;
+    for (int role : m.chordTones)
+        if (role == 3) sawSeventh = true;
+    CHECK(sawSeventh);
+
+    // Nothing chromatic: every tone is diatonic to the parent minor key.
+    const std::set<int> keyPcs = keyScalePcs(scale);
+    for (const Note& n : m.notes)
+        CHECK(keyPcs.count(((n.noteNumber % 12) + 12) % 12) == 1);
+}
+
+// A triad-flavoured scale (minor pentatonic) arp resolves up to the octave: the
+// ascent spells 1-3-5-8, so the root pitch class appears at two octaves a 12
+// apart within a single-octave figure. On the pre-4a arp (1-3-5, no cap) the
+// one-octave figure has a single root, so this fails; the octave cap makes it
+// pass. A flat grey image keeps the arp off the brightness octave-jump path so
+// the pitches are exactly the cycle. Triad scales stay triads: no seventh.
+void test_arpeggio_resolves_to_octave() {
+    const Image image = makeGrey(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = minorPentatonic();
+
+    MelodyOptions o;
+    o.mode = lumena::melody::GenerationMode::Arpeggio;
+    o.arpPattern = ArpPattern::Up;
+    o.arpOctaves = 1;    // one octave, so the "8" can only come from the cap
+    o.arpRate = 0.5;
+    o.loopBars = 2;
+    std::mt19937 rng(7u);
+    const Melody m = generateMelody(grid, scale, o, rng);
+
+    // The lowest note is a chord root (role 0); the same pitch class recurs an
+    // octave above it — the 8 of 1-3-5-8.
+    int lowRoot = 128;
+    for (std::size_t i = 0; i < m.notes.size(); ++i)
+        if (m.chordTones[i] == 0) lowRoot = std::min(lowRoot, m.notes[i].noteNumber);
+    CHECK(lowRoot < 128);
+    bool sawOctave = false;
+    for (const Note& n : m.notes)
+        if (n.noteNumber == lowRoot + 12) sawOctave = true;
+    CHECK(sawOctave);
+
+    // A pure triad scale never spells a seventh.
+    for (int role : m.chordTones) CHECK(role != 3);
+}
+
 // ---- Phase 2: brightness -> pitch blend (FAILING until the blend lands) ------
 // The product promise: at Image Influence = 1.0 the melody should track the
 // image. Concretely, in PHRASED mode a walked note's scale degree should equal
@@ -1456,6 +1544,8 @@ void run_melody_generator_tests() {
     test_chords_are_diatonic_stacks();
     test_chords_spell_harmonic_minor_leading_tone();
     test_arpeggio_spells_harmonic_minor_leading_tone();
+    test_arpeggio_blues_spells_in_scale_seventh();
+    test_arpeggio_resolves_to_octave();
     test_phrased_tracks_brightness_at_high_influence();
     test_phrased_image_density();
     test_image_density_draws_no_rng();

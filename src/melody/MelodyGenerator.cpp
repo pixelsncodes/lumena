@@ -1394,6 +1394,25 @@ bool scaleIsMajor(const Scale& scale) {
     return hasMajor3 && ! hasMinor3;
 }
 
+// True for the minor blues scale, identified by its signature pitch-class trio:
+// a minor third (3), the ♭5 blue note (6), and a ♭7 (10). This trio is unique to
+// blues among the detected scales — minor pentatonic lacks the ♭5, the diatonic
+// modes and harmonic minor lack it too, and Lydian has the ♭5 but no minor
+// third. Blues drops through the non-7-degree fallback in diatonicChord, so its
+// plain minor triad silently loses the ♭7; the arp uses this to voice a real
+// minor-7th (root-♭3-5-♭7) instead, restoring the blue note. Every tone stays
+// inside the parent minor key — no chromatic tones are introduced.
+bool scaleIsBlues(const Scale& scale) {
+    bool hasMinor3 = false, hasFlat5 = false, hasFlat7 = false;
+    for (int iv : scale.intervals) {
+        const int pc = ((iv % 12) + 12) % 12;
+        if (pc == 3) hasMinor3 = true;
+        if (pc == 6) hasFlat5 = true;
+        if (pc == 10) hasFlat7 = true;
+    }
+    return hasMinor3 && hasFlat5 && hasFlat7;
+}
+
 // MIDI notes of a diatonic chord: `size` tones stacked in thirds on diatonic
 // degree `deg` of the key (0..6), voiced upward from `baseMidi + tonicPc`.
 // For a full 7-degree scale the thirds are stacked from the DETECTED scale's own
@@ -1492,6 +1511,12 @@ Melody generateArpeggiated(const BrightnessGrid& grid, const Scale& scale,
     const bool major = scaleIsMajor(scale);
     const bool randomPattern = options.arpPattern == ArpPattern::Random;
 
+    // Chord tones spelled per octave of the arp: a plain triad (1-3-5) for most
+    // scales, a minor-7th (1-♭3-5-♭7) for blues so the ♭7 blue note — dropped by
+    // the plain-triad fallback in diatonicChord — actually sounds. Both stack from
+    // the key, so no chromatic tone is introduced.
+    const int arpChordSize = scaleIsBlues(scale) ? 4 : 3;
+
     const double rate = options.arpRate > 0.0 ? options.arpRate : 0.5;
     const double bpb = options.beatsPerBar > 0.0 ? options.beatsPerBar : 4.0;
     const int notesPerBar = std::max(1, static_cast<int>(std::lround(bpb / rate)));
@@ -1541,14 +1566,22 @@ Melody generateArpeggiated(const BrightnessGrid& grid, const Scale& scale,
         if (bar != currentBar) {
             currentBar = bar;
             std::vector<int> asc;
-            asc.reserve(static_cast<std::size_t>(3 * arpOctaves));
+            asc.reserve(static_cast<std::size_t>(arpChordSize * arpOctaves + 1));
             for (int o = 0; o < arpOctaves; ++o)
-                for (int n : diatonicChord(scale, tonicPc, major, roots[bar], 3,
-                                           kHarmonyBaseMidi + 12 * o))
+                for (int n : diatonicChord(scale, tonicPc, major, roots[bar],
+                                           arpChordSize, kHarmonyBaseMidi + 12 * o))
                     asc.push_back(n);
+            // Cap the ascent with the octave root (the "8" of a 1-3-5-8 arpeggio)
+            // so the figure resolves up to the octave rather than stopping on the
+            // fifth/seventh. It is the chord root voiced one octave above the top
+            // stacked octave; for a multi-octave arp the interior octave roots are
+            // already the "8"s, and this adds the final one.
+            asc.push_back(diatonicChord(scale, tonicPc, major, roots[bar], 1,
+                                        kHarmonyBaseMidi + 12 * arpOctaves)
+                              .front());
             cycle = orderChord(asc, options.arpPattern);
-            barChord = diatonicChord(scale, tonicPc, major, roots[bar], 3,
-                                     kHarmonyBaseMidi);
+            barChord = diatonicChord(scale, tonicPc, major, roots[bar],
+                                     arpChordSize, kHarmonyBaseMidi);
         }
 
         const int within = i % notesPerBar;
