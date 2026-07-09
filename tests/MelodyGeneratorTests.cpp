@@ -1114,6 +1114,30 @@ void test_phrased_image_density() {
     CHECK(denserSeeds >= 35);
 }
 
+// Regression guard: image density is a pure function of the image and draws no
+// RNG, so raising imageRhythmAmount never perturbs the walk's seed stream. Same
+// seed + image => the mt19937 is left in an identical state whatever the amount,
+// so the non-density path (pitches, rests, ornaments) reproduces bit-for-bit.
+void test_image_density_draws_no_rng() {
+    const BrightnessGrid busy(makeCheckerboard(160, 120, 10), 16, 12);
+    const Scale scale = minorPentatonic();
+    for (unsigned seed = 1; seed <= 40; ++seed) {
+        auto endState = [&](double amount) {
+            MelodyOptions o;
+            o.length = 48;
+            o.phraseMode = PhraseMode::Phrased;
+            o.rhythm = RhythmMode::Flowing;
+            o.imageRhythmAmount = amount;
+            std::mt19937 rng(seed);
+            generateMelody(busy, scale, o, rng);
+            return rng();  // one more draw reveals the post-generation state
+        };
+        const std::mt19937::result_type off = endState(0.0);
+        CHECK(endState(0.5) == off);
+        CHECK(endState(1.0) == off);
+    }
+}
+
 // ---- semantic axes ----------------------------------------------------------
 
 // Higher Energy raises overall velocity.
@@ -1310,6 +1334,7 @@ void run_melody_generator_tests() {
     test_arpeggio_spells_harmonic_minor_leading_tone();
     test_phrased_tracks_brightness_at_high_influence();
     test_phrased_image_density();
+    test_image_density_draws_no_rng();
     test_energy_raises_velocity();
     test_repetition_repeats_motif();
     test_recombine_locks_dimensions();
