@@ -617,9 +617,15 @@ private:
             degree_ = chain_.nextBiased(degree_, static_cast<float>(target),
                                         kPhraseEndBias);
         } else {
-            // Base motion: pure Markov (stepwise, with the chain's built-in
-            // anti-repeat / voice-leading rules).
-            int next = static_cast<int>(chain_.next(degree_));
+            // Base motion: theory-weighted Markov, blended toward the degree the
+            // cell's brightness suggests by the Image Influence amount (bias_).
+            // Ports Freeform's proven blend (mapBrightnessToDegree + nextBiased)
+            // into Phrased. nextBiased makes the same single rng draw as next(),
+            // and at bias_=0 is byte-identical to next(), so this is draw-neutral.
+            const int imageTarget =
+                scales::mapBrightnessToDegree(brightness, totalDegrees_);
+            int next = static_cast<int>(chain_.nextBiased(
+                degree_, static_cast<float>(imageTarget), bias_));
 
             // Complexity: occasional leap for interval variety.
             if (uni01() < complexity * 0.4) {
@@ -627,11 +633,11 @@ private:
                                  (2 + static_cast<int>(uni01() * 2.0));  // ±2..3
                 next = clampDegree(next + leap);
             }
-            // Image influence: nudge one step in the brightness-gradient
-            // direction (contour), scaled by the Image Influence amount.
-            if (std::fabs(gradient) > 0.02f && uni01() < bias_) {
-                next = clampDegree(next + (gradient > 0.0f ? 1 : -1));
-            }
+            // Old ±1 gradient nudge retired: the blend at the base-motion step
+            // now carries image influence. The draw is PRESERVED (same
+            // |gradient|>0.02f condition) purely for rng-stream identity, same
+            // pattern as the unconditional snap/anti-stuck coins below.
+            if (std::fabs(gradient) > 0.02f) { (void)uni01(); }
             // Strong beats prefer a chord tone; weak beats may pass through.
             // The snap coin is drawn UNCONDITIONALLY (not short-circuited behind
             // `strong`) so the RNG stream no longer depends on the strong-beat

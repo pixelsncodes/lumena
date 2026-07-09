@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <random>
 #include <set>
 #include <vector>
@@ -15,6 +16,7 @@
 #include "midi/MidiFileWriter.h"
 #include "midi/MidiSequence.h"
 #include "scales/Scale.h"
+#include "scales/ScaleLibrary.h"
 #include "test_util.h"
 
 namespace {
@@ -33,6 +35,7 @@ using lumena::melody::RhythmMode;
 using lumena::midi::MidiFileWriter;
 using lumena::midi::MidiSequence;
 using lumena::midi::Note;
+using lumena::scales::mapBrightnessToDegree;
 using lumena::scales::Scale;
 
 // A smooth 2-D brightness ramp: brightness rises with both x and y, so any two
@@ -954,6 +957,74 @@ void test_arpeggio_spells_harmonic_minor_leading_tone() {
     CHECK(pcs.count(leadingTonePc) == 1);
 }
 
+// ---- Phase 2: brightness -> pitch blend (FAILING until the blend lands) ------
+// The product promise: at Image Influence = 1.0 the melody should track the
+// image. Concretely, in PHRASED mode a walked note's scale degree should equal
+// the degree its source cell's brightness maps to (scales::mapBrightnessToDegree,
+// exactly as Freeform already does at MelodyGenerator.cpp:182-183). Today Phrased
+// mode has NO brightness->degree blend: its only image coupling is a weak,
+// direction-only +-1 gradient nudge (MelodyGenerator.cpp:632), which never sets
+// the degree to the brightness target. So raising Image Influence from 0.0 to
+// 1.0 barely changes how many notes land on their cell's brightness degree.
+//
+// This test counts, over many seeds, how many emitted notes sit exactly on
+// mapBrightnessToDegree(source_brightness) at Influence 0.0 vs 1.0, and asserts
+// the 1.0 count is CLEARLY greater (at least double). On 9242e9c the two counts
+// are ~equal, so it FAILS; once the blend
+//   finalDegree = snapToScale(blend(markovDegree, imageTargetDegree, influence))
+// is added (Influence 1.0 => degree == imageTarget on walked notes), it passes.
+void test_phrased_tracks_brightness_at_high_influence() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const int cols = 16, rows = 12;
+    const BrightnessGrid grid(image, cols, rows);
+    const Scale scale = minorPentatonic();
+    const int octaveSpan = 2;                              // MelodyOptions default
+    const int totalDegrees = scale.usableDegrees(octaveSpan);
+
+    // Count notes whose degree == the degree their source cell's brightness maps
+    // to, summed across a band of seeds so the rate is stable, not seed-luck.
+    auto brightnessMatches = [&](double influence) {
+        long matches = 0;
+        long notes = 0;
+        for (unsigned seed = 1; seed <= 40; ++seed) {
+            MelodyOptions opts;
+            opts.length = 40;
+            opts.octaveSpan = octaveSpan;
+            opts.phraseMode = PhraseMode::Phrased;
+            opts.rhythm = RhythmMode::Flowing;
+            opts.cellPath = CellPath::RandomWalk;
+            opts.arpeggioAmount = 0.0;        // no ornaments/leaps: isolate the blend
+            opts.brightnessBias = influence;  // "Image Influence"
+
+            std::mt19937 rng(seed);
+            const Melody m = generateMelody(grid, scale, opts, rng);
+
+            for (std::size_t i = 0; i < m.degrees.size(); ++i) {
+                // Reconstruct the note's source brightness exactly as the engine
+                // sampled it: from the grid cell recorded on the note.
+                const float b = grid.valueAt(m.cells[i].col, m.cells[i].row);
+                if (m.degrees[i] == mapBrightnessToDegree(b, totalDegrees))
+                    ++matches;
+                ++notes;
+            }
+        }
+        std::printf("    [influence=%.1f] %ld/%ld notes on their brightness degree\n",
+                    influence, matches, notes);
+        return matches;
+    };
+
+    const long matchesLow = brightnessMatches(0.0);
+    const long matchesHigh = brightnessMatches(1.0);
+
+    // Sanity: the 0.0 baseline has some incidental matches to divide against
+    // (guards the "at least double" ratio below from a trivial 0-vs-0 pass).
+    CHECK(matchesLow > 0);
+    // The core assertion: Image Influence = 1.0 tracks brightness CLEARLY more
+    // than Influence = 0.0. "Clearly" = at least double the matching notes.
+    CHECK(matchesHigh > matchesLow);
+    CHECK(matchesHigh >= 2 * matchesLow);
+}
+
 // ---- semantic axes ----------------------------------------------------------
 
 // Higher Energy raises overall velocity.
@@ -1148,6 +1219,7 @@ void run_melody_generator_tests() {
     test_chords_are_diatonic_stacks();
     test_chords_spell_harmonic_minor_leading_tone();
     test_arpeggio_spells_harmonic_minor_leading_tone();
+    test_phrased_tracks_brightness_at_high_influence();
     test_energy_raises_velocity();
     test_repetition_repeats_motif();
     test_recombine_locks_dimensions();
