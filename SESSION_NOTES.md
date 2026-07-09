@@ -1,3 +1,48 @@
+# Follow-on task — dynamics smoothing (anti-whiplash)
+
+*Separate from Phase 3 (which is done/accepted). Velocity/dynamics only — no
+pitch or rhythm change.*
+
+**Problem:** phrase dynamics stabbed note-to-note (fff → mp → f → p almost every
+beat). Root cause in `applyPhraseDynamics`: the smooth phrase arc (weight 0.7)
+was blended with each note's *raw* cell brightness (weight 0.3), and the random
+walk visits bright/dark cells back to back, so the brightness term whipped the
+velocity up and down every note. Present in the baseline, independent of density.
+
+**Fix (`7cdb24a`, velocity only):**
+1. Low-pass the brightness tint across the phrase (one-pole, `kBrightnessInertia
+   = 0.6`) so the image colours the dynamics as a slow drift, not a per-note stab.
+2. Slew-cap the note-to-note velocity change to `kMaxDynStep = 12` *within* a
+   phrase, so it swells and settles while the arc's own rise/fall still shows.
+   Cross-phrase boundaries are left uncapped on purpose — each phrase keeps its
+   own fresh dynamic arc (and a rest sits between them ~60% of the time).
+
+**RNG / pitch / rhythm untouched:** the new code draws no RNG (the single
+peak-jitter draw is preserved verbatim), so melodies are otherwise identical.
+Verified against `ad84373` across 160 cases (2 images × 2 density × 40 seeds):
+**0 pitch/rhythm/RNG mismatches, velocity differs everywhere.**
+
+**Measured note-to-note velocity jump** (gradient image, 200 seeds, baseline
+density): median 15 → 13, **p90 27 → 14**, **jumps ≥ 20: 32% → 4%**, dynamic
+range preserved. Within-phrase jumps are hard-capped at 12 (test-proven). The
+whole-melody *max* improves less (47 → 40) because that is a cross-phrase
+boundary, which is intentionally not capped.
+
+**Test:** `test_phrased_dynamics_are_smooth` — within each phrase (via
+`phraseStarts`), consecutive |Δvelocity| ≤ `kMaxDynStep` at Energy 0.5 (where the
+energy scale is exactly 1.0), plus a dynamic-range floor so it can't pass by
+going flat. Full suite: **17809/17809 green.**
+
+**Before/after samples:** the three `samples/phase3-density/density-*.mid` clips
+(same seed 2024, same notes) were regenerated with the smooth dynamics; the
+pre-fix versions are kept alongside in
+`samples/phase3-density/pre-dynamics-smoothing/` for a direct A/B by ear (same
+notes, only velocities differ — e.g. baseline clip range 114 → 100 peak, the
+per-beat stabs gone). WAV/MP3 still needs a soundfont on your end (none installed
+here).
+
+---
+
 # Phase 3 session notes — image-driven bar-relative rhythm/density
 
 Branch `feature/image-contour`. Baseline was `31d2c21` (Phase-2 pitch-blend
