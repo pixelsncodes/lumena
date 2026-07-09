@@ -95,6 +95,66 @@ cmake --build build-wsl --target LumenaTests
 `varyMotif`'s inlined vector copy — documented at that call site, not from Phase
 3, and not an error under the WSL flags.)
 
+## Plugin wiring (Density param) — added after Stage 3
+
+`imageRhythmAmount` is now a real plugin parameter in the parent Lumen repo
+(these changes live in the PARENT, not this submodule):
+
+- `Source/State/Parameters.h` — new id `melodyDensity`; `kStateVersion` bumped
+  2 → 3 (inert — no migration logic keys off it; per repo convention a melody
+  param change bumps it).
+- `Source/State/Parameters.cpp` — `FloatParam "Melody Density"`, **range 0..1
+  (`unitRange`), default 0.0**, `unitAttr` — identical to the other four macros
+  (Energy/Complexity/Image Influence/Repetition). No audio-rate smoothing: like
+  the sibling macros it is read once at `generate()` time, not in `processBlock`.
+- `Source/Melody/MelodyController.cpp` — `optionsFromParams` maps
+  `melodyDensity → MelodyOptions::imageRhythmAmount`.
+- `Tools/Tests/TestsMain.cpp` — new `MelodyDensityWiringTest` (category "Melody"):
+  drives the real `MelodyController::generate()` on a high-contrast test image and
+  checks Density 0 defaults/no-ops deterministically, Density 1 emits strictly
+  more notes, and returning to 0 restores the baseline count.
+- `CMakeLists.txt` — `lumen_tests` now compiles `MelodyState.cpp`,
+  `MelodyPlayer.cpp` and the `MelodyController.cpp` bridge and links
+  `Lumena::Lumena` (the bridge stays out of the strict `/W4 /WX` pass, mirroring
+  the plugin target).
+
+No-op guarantee survives the wiring: default 0 ⇒ `imageRhythmAmount = 0` ⇒ the
+engine's byte-exact groove-only path. Existing patches (which never set
+`melodyDensity`) load it at its 0 default, so they are unchanged.
+
+**Verification:** parent `lumen_tests` (built headless under WSL via `build-linux`)
+— the new wiring test passes; the only failing test is the pre-existing
+`wavetable SHA-256 matches the pinned reference` (a Lens/wavetable golden pinned
+on the Windows toolchain; Linux FP differs — unrelated to this work, untouched).
+
+### Follow-up NOT done here (needs the Windows GUI toolchain)
+- **UI knob in `Source/UI/MelodyPanel.cpp`.** The four macro knobs share one row
+  split into fixed widths (`resized()`, ~L405-408); adding a "DENSITY" knob means
+  re-dividing that row 4 → 5 and fitting a longer label. CLAUDE.md requires a
+  `Lumen.exe --screenshot` inspection after any UI change, which can't run under
+  WSL, so I did not ship unverified layout. The parameter is still fully usable at
+  runtime via host automation and is persisted in state/presets. Adding the knob
+  is a small, well-scoped Phase-5 task (declare `densityKnob`, construct like the
+  others with label "DENSITY", change `kw` to width/5, add one `setBounds`).
+
+## Before/after samples (Phase 3 density)
+
+Short 8-bar MIDI clips, **same seed (2024)**, same checkerboard (high-contrast)
+image, 110 BPM, A-minor-pentatonic — only Density changes, everything else fixed.
+Saved to `C:\Users\pixel\Projects\lumen\samples\phase3-density\`
+(`/mnt/c/Users/pixel/Projects/lumen/samples/phase3-density/`):
+
+| File | Density | Notes / 8 bars | Demonstrates |
+|------|---------|----------------|--------------|
+| `density-00-baseline.mid` | 0.0 | 37 | Groove-only baseline (feature off) |
+| `density-05-mid.mid`      | 0.5 | 103 | Busy regions start subdividing |
+| `density-10-high.mid`     | 1.0 | 136 | Full image-driven density |
+
+All three are exactly 8 bars — density subdivides within the bar grid, it does
+not change the length. **WAV/MP3 rendering:** no soundfont/renderer is installed
+in this environment, so only the MIDI clips are provided; render them through any
+soundfont (e.g. `fluidsynth -F out.wav sf2 density-*.mid`) on your end to audition.
+
 ## Where the next session picks up
 
 - Phase 3 remaining roadmap items **not** done here: multi-bar (2/4-bar) +
