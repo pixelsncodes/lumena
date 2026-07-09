@@ -50,10 +50,13 @@ constexpr float kPhraseEndBias = 0.85f;
 constexpr double kCadenceBeats = 2.0;
 // Cells at least this bright are preferred as arpeggio ornament sites.
 constexpr float kArpeggioBrightness = 0.7f;
-// Tick resolution for strong-beat detection: beat positions are quantised to an
-// integer tick grid so the on-beat test is exact integer arithmetic, not a
-// float epsilon compare. 960 PPQ divides all current durations (multiples of
-// 0.5 -> 480 ticks) cleanly.
+// Tick resolution for strong-beat detection AND rhythm quantisation: beat
+// positions are quantised to an integer tick grid so the on-beat test is exact
+// integer arithmetic, not a float epsilon compare. 960 = 2^6 * 3 * 5, so it
+// divides every subdivision the generator emits cleanly: dyadic values
+// (0.5 -> 480), triplet ornaments (1/3 -> 320) and image-density splits down to
+// 1/64 (15 ticks) all land on integer ticks. Only 7-based tuplets (or values
+// finer than 1/64) would fall off the grid; the generator emits none.
 constexpr long kTicksPerBeat = 960;
 
 // ---- phrase-dynamics (contour) constants ------------------------------------
@@ -233,6 +236,16 @@ struct PhraseNote {
     // false and are left exactly as generated.
     double snapCoin = 1.0;   ///< the unconditional snap coin drawn in pass 1 (>=0.6 => never snaps)
     bool eligible = false;   ///< walked non-ending note (a snap site candidate)
+
+    // ---- rhythm/density (Phase 3) -------------------------------------------
+    // `templated` marks a walked note whose emitted duration is taken from the
+    // session groove tiled to real bar lines (barAlignedDuration) rather than
+    // from the note itself. Ornament figures and the cadence note carry their
+    // own hand-set durations and are left false. `subdivisions` (>= 1) is the
+    // image-density decision made pre-flatten: how many equal on-grid pieces
+    // this note's bar-aligned duration is split into (1 = no split).
+    bool templated = false;
+    int subdivisions = 1;
 };
 
 // State the phrase builder threads through generation: the grid walk position,
@@ -543,6 +556,10 @@ public:
         return pick(rng_) == 0 ? 0.5 : 1.0;
     }
 
+    // The session's one groove (durations summing to a bar). The flatten loop
+    // tiles this to the real bar line to emit each templated note's duration.
+    const std::vector<double>& rhythmTemplate() const { return rhythmTemplate_; }
+
     // Pass 2 of the 4a two-pass. Pass 1 (the walk + flatten above) established
     // every note's REAL emitted start beat, including rests and ornaments; here
     // we re-decide the strong beat and chord-tone snap against THAT beat rather
@@ -678,6 +695,13 @@ private:
         note.dbgChordRoot = curChordRoot_; // diagnostics only
         note.snapCoin = snapCoinVal;       // pass-2 input (bug 4, 4a)
         note.eligible = !ending;           // walked non-ending -> a snap site candidate
+        note.templated = true;             // emitted duration comes from the bar-tiled groove
+        // Provisional duration for the pass-1 walk clock (localBeat_/harmonyBeat_
+        // and thus strong-beat/snap decisions). The nextDuration() cursor is kept
+        // ONLY as this back-compat walk clock so the pass-1 pitch trajectory is
+        // unchanged; the EMITTED duration is re-derived from the real bar line in
+        // the flatten loop (barAlignedDuration), which the cursor could not do
+        // (it never reset and ignored rests). See Phase 3 notes.
         note.lengthBeats = (options_.rhythm == RhythmMode::Flowing)
                                ? nextDuration()
                                : 1.0;
@@ -806,6 +830,31 @@ private:
     std::size_t rhythmCursor_ = 0;
 };
 
+// The emitted duration of a templated note starting at `startBeat`: the beats
+// from that position to the next slot boundary of the groove tiled from beat 0.
+// Because the groove is tiled to the absolute (real) timeline — start beats that
+// already fold in rests and ornaments — the template restarts on every downbeat
+// and re-aligns after any offset, instead of the old note-count cursor that
+// never reset and drifted once rests/ornaments/copied phrases shifted things.
+// All inputs (template slots, real start beats) are on the 960 tick grid, so the
+// tick arithmetic is exact and the result lands on an integer tick too.
+double barAlignedDuration(double startBeat, const std::vector<double>& tmpl) {
+    if (tmpl.empty()) return 1.0;
+    long periodTicks = 0;
+    for (double slot : tmpl) periodTicks += std::lround(slot * kTicksPerBeat);
+    if (periodTicks <= 0) return 1.0;
+    const long tick = std::lround(startBeat * static_cast<double>(kTicksPerBeat));
+    const long pos = ((tick % periodTicks) + periodTicks) % periodTicks;
+    long acc = 0;
+    for (double slot : tmpl) {
+        acc += std::lround(slot * kTicksPerBeat);
+        if (pos < acc)
+            return static_cast<double>(acc - pos) /
+                   static_cast<double>(kTicksPerBeat);
+    }
+    return tmpl.back();  // unreachable: pos < periodTicks == acc
+}
+
 // Builds a structured, phrased melody: motif (A), varied repeat (A'),
 // contrasting phrase (B), extended as needed (A'' B ...), then a tonic-landing
 // closing phrase. Rests fall between phrases at kRestProbability, and each
@@ -894,17 +943,29 @@ Melody generatePhrased(const BrightnessGrid& grid, const Scale& scale,
 
         if (p > 0 && builder.rollRest()) {
             // Higher Energy tightens the gaps between phrases (0 -> ~1.3x rests,
-            // 1 -> ~0.7x), for a more driving feel.
-            beat += builder.restLength() * (1.3 - 0.6 * clampUnit(options.energy));
+            // 1 -> ~0.7x), for a more driving feel. Snap the gap to the half-beat
+            // grid so the next phrase starts on a groove boundary and the tiled
+            // template stays aligned (all positions land on the 960 tick grid).
+            const double rest =
+                builder.restLength() * (1.3 - 0.6 * clampUnit(options.energy));
+            beat += std::round(rest * 2.0) / 2.0;
         }
 
         melody.phraseStarts.push_back(melody.notes.size());
         for (const PhraseNote& pn : phrases[p]) {
+            // Templated notes take their emitted length from the groove tiled to
+            // the real bar line (so it restarts each downbeat and re-aligns after
+            // rests/ornaments); ornament figures and the cadence keep their own
+            // hand-set durations. Straight mode keeps its flat quarter notes.
+            const double emitLen =
+                (pn.templated && options.rhythm == RhythmMode::Flowing)
+                    ? barAlignedDuration(beat, builder.rhythmTemplate())
+                    : pn.lengthBeats;
             Note note;
             note.noteNumber = pn.noteNumber;
             note.velocity = applyEnergy(pn.velocity, options.energy);
             note.startBeats = beat;
-            note.lengthBeats = pn.lengthBeats;
+            note.lengthBeats = emitLen;
             melody.notes.push_back(note);
             melody.degrees.push_back(pn.degree);
             melody.cells.push_back(GridCell{pn.col, pn.row});
@@ -913,7 +974,7 @@ Melody generatePhrased(const BrightnessGrid& grid, const Scale& scale,
             melody.dbgChordRoot.push_back(pn.dbgChordRoot);         // diagnostics only
             snapCoins.push_back(pn.snapCoin);
             eligible.push_back(pn.eligible ? 1 : 0);
-            beat += pn.lengthBeats;
+            beat += emitLen;
         }
     }
 
