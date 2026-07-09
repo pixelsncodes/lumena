@@ -1815,6 +1815,50 @@ void test_splice_count_matches_and_holds_last() {
     CHECK(lr2.notes[2].noteNumber == 72);
 }
 
+// Phase 4b-fix: the splice is PHRASE-AWARE. After a lock-pitch -> new-rhythm
+// recombine (timing from the candidate, pitch from the previous), each rhythm
+// phrase's FINAL slot carries the corresponding pitch phrase's FINAL pitch — so
+// the pitch source's phrase-end resolutions (4c chord-tone/cadence landings) land
+// on phrase ends of the timing track instead of drifting mid-phrase. Checked on
+// the checkerboard where both melodies are phrased (so both carry phraseStarts).
+void test_recombine_phrase_aware_alignment() {
+    const BrightnessGrid grid(makeCheckerboard(160, 120, 10), 16, 12);
+    const Scale scale = minorPentatonic();
+
+    MelodyOptions o;
+    o.phraseMode = PhraseMode::Phrased;
+    o.length = 32;
+    o.loopBars = 8;
+    o.beatsPerBar = 4.0;
+
+    std::mt19937 a(2024u), b(99u);
+    const Melody prev = generateMelody(grid, scale, o, a);
+    const Melody cand = generateMelody(grid, scale, o, b);
+    CHECK(!prev.phraseStarts.empty());
+    CHECK(!cand.phraseStarts.empty());
+
+    // Lock pitch: timing/phrases from candidate, pitch from previous.
+    const Melody out = recombineLocked(prev, cand, scale, { false, true }, o);
+    CHECK(out.notes.size() == cand.notes.size());
+    CHECK(out.phraseStarts == cand.phraseStarts);   // phrases follow the timing track
+
+    const auto& rS = cand.phraseStarts;   // rhythm phrases (output slots)
+    const auto& pS = prev.phraseStarts;   // pitch phrases
+    const std::size_t PR = rS.size(), PP = pS.size();
+    const std::size_t n = cand.notes.size(), pnn = prev.notes.size();
+    for (std::size_t p = 0; p < PR; ++p) {
+        const std::size_t rEnd = (p + 1 < PR) ? rS[p + 1] : n;
+        const std::size_t q = std::min(p, PP - 1);            // hold-last phrase
+        const std::size_t pEnd = (q + 1 < PP) ? pS[q + 1] : pnn;
+        // The phrase-final slot takes the pitch phrase's final (resolution) pitch.
+        CHECK(out.notes[rEnd - 1].noteNumber == prev.notes[pEnd - 1].noteNumber);
+    }
+
+    // Pure/deterministic: same inputs -> byte-identical.
+    const Melody out2 = recombineLocked(prev, cand, scale, { false, true }, o);
+    CHECK(melodyNotesIdentical(out, out2));
+}
+
 // ---- Phase 4b: Lock Harmony (progression as a lockable input) ---------------
 // A fresh generation records its chosen progression on Melody::progression.
 // Feeding that back via MelodyOptions::progression pins the harmony across a
@@ -1934,5 +1978,6 @@ void run_melody_generator_tests() {
     test_mutate_preserves_bar_count_and_skeleton();
     test_splice_locks_deterministic();
     test_splice_count_matches_and_holds_last();
+    test_recombine_phrase_aware_alignment();
     test_lock_harmony_carries_progression();
 }

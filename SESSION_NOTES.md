@@ -41,6 +41,53 @@ and never trims, so `loopBars` is a *floor*: the phrased path itself overshoots 
 an 8-bar loop renders as **9 bars** when the body runs long. Changing pad-to-trim
 behaviour is a generation re-baseline and belongs in its own pass.
 
+## Commit 2 — recombineLocked splice is phrase-aware
+
+**Defect:** the splice mapped pitch by raw note index (`pitch = pitchSrc[min(i,
+size-1)]`, phrase-blind), so the pitch source's phrase-end resolutions (the 4c
+chord-tone/cadence landings) fell on the OTHER track's *different* phrase
+boundaries — resolutions drifting mid-phrase. This is why lock-pitch → new-rhythm
+auditioned poorly.
+
+**Fix:** when both tracks carry phrase boundaries (`Melody::phraseStarts`), the
+splice aligns **phrase-to-phrase**. Rhythm phrase `p` draws from pitch phrase
+`min(p, lastPitchPhrase)` (extra rhythm phrases reuse the last pitch phrase);
+within a phrase, pitches fill **in order** and the phrase's **final slot always
+takes the pitch phrase's final pitch**, so the resolution lands on the phrase end.
+The prior count-matching rule is preserved (locked track authoritative for
+count/timing; hold-last within a phrase, never cycle-from-start). Falls back to
+the flat in-order/hold-last splice when either track lacks phrase info (Freeform).
+
+**Plugin carrier (minimal, no state change):** the stored plugin `Sequence` does
+not carry phrase boundaries, so `sequenceToMelody(currentSeq)` had none — the
+plugin's lock-pitch would fall back to index-based. Rather than change the state
+schema, `MelodyController` keeps `currentPhraseStarts` in memory (like
+`currentProgression`) and restores it onto `prev` before the splice. Note indices
+survive the Sequence round-trip (same count/order) and the phrase boundaries are
+index-invariant across mutate (onsets/count fixed), so the carrier stays valid.
+Session-memory only (not persisted across reload — same known limitation as
+`currentProgression`).
+
+**Tests:** `test_recombine_phrase_aware_alignment` (checkerboard, both phrased:
+after a lock-pitch splice every rhythm phrase's final slot carries the pitch
+phrase's final pitch; output phrases follow the timing track; pure/deterministic).
+Existing `test_recombine_locks_dimensions` / `test_splice_count_matches_and_holds_last`
+(Freeform / hand-built, no phraseStarts) still pass via the fallback. Engine
+**22524/22524 green**; parent green except the pre-existing wavetable golden.
+
+**Determinism:** `recombineLocked` draws no RNG (pure). Generation byte-identical
+to prior across all modes (both fixes are post-hoc primitives). Verified: the
+checkerboard lock-pitch splice re-runs byte-identical.
+
+## Samples — `samples/phase4b-fix/` (parent repo)
+
+- `mutate-before.mid` / `mutate-after.mid` (Mona Lisa, amount 0.30, seed 7):
+  **base 9 bars → mutate 9 bars** (was 9 → 10), onsets byte-identical (rests kept).
+- `lock-pitch_new-rhythm.mid` (Mona Lisa, base 2024 / regen 4242): phrase-aligned
+  splice — pitch-source resolutions land on the new rhythm's phrase ends.
+- `determ-checkerboard.mid`: lock-pitch splice re-run byte-identical.
+  WAV/MP3 still needs a soundfont on your end.
+
 ---
 
 # Phase 4c — Better cadences / phrase endings

@@ -1934,29 +1934,75 @@ Melody recombineLocked(const Melody& previous, const Melody& candidate,
     const Melody& rhythmSrc = locks.rhythm ? previous : candidate;
     const Melody& pitchSrc = locks.pitch ? previous : candidate;
     const int span = std::max(options.octaveSpan, 2);
+    (void)scale;
+    (void)span;
+
+    const std::size_t n = rhythmSrc.notes.size();
+    const std::size_t pn = pitchSrc.notes.size();
+
+    // Decide, per output slot, which pitch-source note supplies its pitch. The
+    // output ALWAYS has the rhythm track's count/timing (the locked-track rule);
+    // this only chooses the pitch mapping.
+    std::vector<std::size_t> pitchIdx(n);
+
+    // Phrase-aware mapping (Phase 4b-fix): when BOTH tracks carry phrase
+    // boundaries, align the pitch source's phrases onto the rhythm track's
+    // phrases so a phrase-final pitch (the 4c chord-tone/cadence resolution) lands
+    // on a phrase-final slot instead of drifting mid-phrase. Rhythm phrase p draws
+    // from pitch phrase min(p, lastPitchPhrase) (extra rhythm phrases reuse the
+    // last pitch phrase); within a phrase, pitches fill IN ORDER and the phrase's
+    // FINAL slot always takes the pitch phrase's FINAL pitch (hold-last otherwise
+    // — no cycle-from-start). Falls back to a flat in-order/hold-last splice when
+    // either track has no phrase info (e.g. Freeform).
+    const bool phraseAware =
+        !rhythmSrc.phraseStarts.empty() && !pitchSrc.phraseStarts.empty();
+    if (phraseAware) {
+        const auto& rS = rhythmSrc.phraseStarts;
+        const auto& pS = pitchSrc.phraseStarts;
+        const std::size_t PR = rS.size();
+        const std::size_t PP = pS.size();
+        for (std::size_t p = 0; p < PR; ++p) {
+            const std::size_t rBeg = rS[p];
+            const std::size_t rEnd = (p + 1 < PR) ? rS[p + 1] : n;
+            const std::size_t q = std::min(p, PP - 1);          // hold-last phrase
+            const std::size_t pBeg = pS[q];
+            const std::size_t pEnd = (q + 1 < PP) ? pS[q + 1] : pn;
+            const std::size_t K = (pEnd > pBeg) ? (pEnd - pBeg) : 0;
+            for (std::size_t i = rBeg; i < rEnd && i < n; ++i) {
+                const std::size_t j = i - rBeg;                 // slot within phrase
+                std::size_t pi;
+                if (i + 1 == rEnd && pEnd > 0) {
+                    pi = pEnd - 1;                              // phrase-final -> final pitch
+                } else if (K > 0) {
+                    pi = pBeg + std::min(j, K - 1);            // in order, hold-last
+                } else {
+                    pi = (pn > 0) ? pn - 1 : 0;
+                }
+                pitchIdx[i] = (pi < pn) ? pi : (pn ? pn - 1 : 0);
+            }
+        }
+    } else {
+        for (std::size_t i = 0; i < n; ++i)
+            pitchIdx[i] = std::min(i, pn - 1);  // flat in-order, clamp-to-last
+    }
 
     Melody out;
-    const std::size_t n = rhythmSrc.notes.size();
     out.notes.reserve(n);
     out.degrees.reserve(n);
     out.cells.reserve(n);
     for (std::size_t i = 0; i < n; ++i) {
-        // In order, clamped to the last pitch (no cycle-from-start).
-        const std::size_t pi = std::min(i, pitchSrc.notes.size() - 1);
+        const std::size_t pi = pitchIdx[i];
         Note note;
         note.startBeats = rhythmSrc.notes[i].startBeats;
         note.lengthBeats = rhythmSrc.notes[i].lengthBeats;
         note.noteNumber = pitchSrc.notes[pi].noteNumber;
         note.velocity = pitchSrc.notes[pi].velocity;
         out.notes.push_back(note);
-        out.degrees.push_back(pi < pitchSrc.degrees.size()
-                                  ? pitchSrc.degrees[pi]
-                                  : 0);
+        out.degrees.push_back(pi < pitchSrc.degrees.size() ? pitchSrc.degrees[pi]
+                                                           : 0);
         out.cells.push_back(pi < pitchSrc.cells.size() ? pitchSrc.cells[pi]
                                                        : GridCell{});
     }
-    (void)scale;
-    (void)span;
     // Phrase boundaries follow the rhythm track (that's what defines timing).
     out.phraseStarts = rhythmSrc.phraseStarts;
     return out;
