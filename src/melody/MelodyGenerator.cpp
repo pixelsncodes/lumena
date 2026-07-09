@@ -147,6 +147,11 @@ constexpr int kMinorSteps[7] = {0, 2, 3, 5, 7, 8, 10};
 // Defined below; forward-declared so the phrased melody can target it too.
 std::vector<int> progressionRoots(int count, std::mt19937& rng);
 
+// Brightness range (detail/edges) in the 8-neighbour window around a cell.
+// Defined below; forward-declared so the phrase builder can average it into an
+// image-detail scalar that steers rhythm-template selection (Phase 3.5).
+float localContrast(const BrightnessGrid& grid, int col, int row);
+
 // The original flat walk: a single continuous theory-weighted Markov walk,
 // steered by grid brightness. Kept byte-for-byte so a fixed seed reproduces the
 // pre-phrase-structure behaviour.
@@ -298,6 +303,7 @@ public:
         beatsPerBar_ = options.beatsPerBar > 0.0 ? options.beatsPerBar : 4.0;
         progression_ = progressionRoots(4, rng);
         updateHarmonyTarget(0.0);  // start on the progression's first chord
+        imageDetail_ = computeImageDetail();  // busy/edgy image -> busier groove
         pickRhythmTemplate();      // lock one groove for the session
     }
 
@@ -780,31 +786,56 @@ private:
         return d;
     }
 
-    // Chooses one one-bar rhythm template for the whole session, weighted so
-    // higher Energy favours busier grooves. Each template's durations sum to a
-    // bar (beatsPerBar_), so cycling it tiles cleanly.
+    // Mean local contrast across the whole grid, in [0, 1]: a cheap "how much
+    // detail / how many edges" scalar. Pure function of the image, draws no RNG.
+    // Feeds rhythm-template selection so busy/edgy images pick busier grooves
+    // (Phase 3.5), folding "image detail" into the Phase-3 "energy" chooser.
+    double computeImageDetail() const {
+        const int cols = grid_.columns();
+        const int rows = grid_.rows();
+        if (cols <= 0 || rows <= 0) return 0.0;
+        double sum = 0.0;
+        for (int r = 0; r < rows; ++r)
+            for (int c = 0; c < cols; ++c)
+                sum += static_cast<double>(localContrast(grid_, c, r));
+        return clampUnit(sum / static_cast<double>(cols * rows));
+    }
+
+    // Chooses one two-bar rhythm template for the whole session (Phase 3.5).
+    // Replaces the old eight one-bar even-ish grooves with a small curated set
+    // that (a) spans two bars, so phrases stop feeling like one-bar loops, and
+    // (b) carries real syncopation — off-beat 3-3-2 pushes and a long-short-short
+    // answer — so busy passages breathe instead of collapsing to straight runs.
+    // Each template's durations sum to two 4/4 bars (8 beats) and every slot is
+    // an exact 960-tick value (quarters, eighths, dotted eighths, halves), so
+    // barAlignedDuration tiles it cleanly on the grid. Selection blends Energy
+    // with image detail: energetic sessions and busy images both favour busier
+    // grooves. `barAlignedDuration` already tiles by the template's own period,
+    // so the 2-bar span needs no other timeline change (Phase 3 handoff note).
     void pickRhythmTemplate() {
         struct RhythmTemplate { std::vector<double> beats; };
         static const std::vector<RhythmTemplate> kTemplates = {
-            {{2.0, 1.0, 1.0}},                        // half + two quarters (3)
-            {{1.0, 1.0, 1.0, 1.0}},                   // steady quarters      (4)
-            {{1.5, 0.5, 1.0, 1.0}},                   // charleston           (4)
-            {{1.5, 0.5, 1.5, 0.5}},                   // dotted swing         (4)
-            {{1.0, 0.5, 0.5, 1.0, 1.0}},              // rock eighths         (5)
-            {{0.5, 1.0, 0.5, 1.0, 1.0}},              // off-beat push        (5)
-            {{1.0, 0.5, 0.5, 1.0, 0.5, 0.5}},         // gallop               (6)
-            {{0.5, 0.5, 0.5, 0.5, 1.0, 1.0}},         // driving sixteenths   (6)
+            // 0 — calm: quarter anchor, then a long-short-short answer bar.
+            {{1.0, 1.0, 1.0, 1.0,  2.0, 1.0, 1.0}},
+            // 1 — groovy: 3-3-2 syncopated push in both bars (dotted-eighth
+            //     pushes onto the off-beats; downbeats 1 and 3 stay anchored).
+            {{0.75, 0.75, 0.5, 0.75, 0.75, 0.5,
+              0.75, 0.75, 0.5, 0.75, 0.75, 0.5}},
+            // 2 — driving: four eighths then a 3-3-2 push, both bars.
+            {{0.5, 0.5, 0.5, 0.5, 0.75, 0.75, 0.5,
+              0.5, 0.5, 0.5, 0.5, 0.75, 0.75, 0.5}},
         };
-        const double e = clampUnit(options_.energy);
+        // Activity in [0,1]: energetic OR detailed images push toward busier.
+        const double activity =
+            clampUnit(0.5 * clampUnit(options_.energy) + 0.5 * imageDetail_);
         std::vector<double> weights;
         weights.reserve(kTemplates.size());
-        for (const RhythmTemplate& t : kTemplates) {
-            // Density normalised to ~[0,1]: 3 notes/bar -> 0, 6 notes/bar -> 1.
-            const double dn = (static_cast<double>(t.beats.size()) - 3.0) / 3.0;
-            // Match is highest when the template's density tracks Energy; cubed
-            // to sharpen the bias (energetic sessions clearly favour busier
-            // grooves), with a small floor so nothing is ever impossible.
-            const double match = e * dn + (1.0 - e) * (1.0 - dn);
+        const double last = static_cast<double>(kTemplates.size() - 1);
+        for (std::size_t i = 0; i < kTemplates.size(); ++i) {
+            // Rank 0..1 by busyness; match peaks when the groove's rank tracks
+            // activity. Cubed to sharpen, with a floor so nothing is impossible.
+            const double rank = last > 0.0 ? static_cast<double>(i) / last : 0.0;
+            const double match = 1.0 - std::fabs(activity - rank);
             weights.push_back(0.04 + match * match * match);
         }
         std::discrete_distribution<std::size_t> pick(weights.begin(), weights.end());
@@ -857,9 +888,11 @@ private:
     bool progMajor_ = false;
     double beatsPerBar_ = 4.0;
     double harmonyBeat_ = 0.0;  // beats elapsed across the whole melody
-    // Session-locked rhythm: one one-bar groove the melody cycles through.
+    // Session-locked rhythm: one two-bar groove the melody cycles through.
     std::vector<double> rhythmTemplate_;
     std::size_t rhythmCursor_ = 0;
+    // Mean grid local contrast (image detail), in [0,1]; steers template choice.
+    double imageDetail_ = 0.0;
 };
 
 // The emitted duration of a templated note starting at `startBeat`: the beats
