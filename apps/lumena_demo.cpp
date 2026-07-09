@@ -63,7 +63,8 @@ void printUsage(const char* argv0) {
                  "          [--arp-pattern up|down|updown|converge|random]\n"
                  "          [--loop-bars 0|1|2|4|8]\n"
                  "          [--energy 0..1] [--complexity 0..1]\n"
-                 "          [--image-influence 0..1] [--repetition 0..1]\n",
+                 "          [--image-influence 0..1] [--repetition 0..1]\n"
+                 "          [--density 0..1]\n",
                  argv0);
 }
 
@@ -127,6 +128,8 @@ bool parseArgs(int argc, char** argv, Options& opts) {
             opts.melody.brightnessBias = std::strtod(argv[++i], nullptr);
         } else if (arg == "--repetition" && i + 1 < argc) {
             opts.melody.repetition = std::strtod(argv[++i], nullptr);
+        } else if (arg == "--density" && i + 1 < argc) {
+            opts.melody.imageRhythmAmount = std::strtod(argv[++i], nullptr);
         } else if (arg == "--arp-octaves" && i + 1 < argc) {
             opts.melody.arpOctaves =
                 static_cast<int>(std::strtol(argv[++i], nullptr, 10));
