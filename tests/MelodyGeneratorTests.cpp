@@ -1237,6 +1237,30 @@ void test_density_composes_melodic_content() {
     CHECK(movedGroups * 2 >= splitGroups);
 }
 
+// Phase 3.5: the two-bar syncopated rhythm templates keep every note on the
+// 960-tick grid across the whole Energy range (the dotted-eighth 3-3-2 pushes
+// and long-short-short answers are all exact tick fractions). Guards against a
+// future template whose slot lengths would drift off-grid, and confirms the
+// off-beat (syncopated) onsets the phase adds still land on integer ticks so
+// the pass-2 reconciliation sees clean beats.
+void test_phrased_syncopation_on_grid() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = minorPentatonic();
+    for (double energy : {0.0, 0.25, 0.5, 0.75, 1.0}) {
+        for (unsigned seed = 1; seed <= 30; ++seed) {
+            MelodyOptions o;
+            o.length = 48;
+            o.phraseMode = PhraseMode::Phrased;
+            o.rhythm = RhythmMode::Flowing;
+            o.energy = energy;
+            std::mt19937 rng(seed);
+            const Melody m = generateMelody(grid, scale, o, rng);
+            CHECK(allOnTickGrid(m));
+        }
+    }
+}
+
 // ---- semantic axes ----------------------------------------------------------
 
 // Higher Energy raises overall velocity.
@@ -1436,6 +1460,7 @@ void run_melody_generator_tests() {
     test_phrased_image_density();
     test_image_density_draws_no_rng();
     test_density_composes_melodic_content();
+    test_phrased_syncopation_on_grid();
     test_energy_raises_velocity();
     test_repetition_repeats_motif();
     test_recombine_locks_dimensions();
