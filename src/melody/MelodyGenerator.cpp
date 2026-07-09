@@ -725,6 +725,40 @@ public:
         motifAnchorRow_ = r;
     }
 
+    // Variant C (C-3): open-ended B cadence. Snaps a B phrase's final note to
+    // the nearest scale degree with half-cadence function — the second (pitch
+    // class 2 above the root) or the fifth (pitch class 7), tie-break to the
+    // fifth — so B opens tension that the following A-family return answers,
+    // instead of parking on a resolved chord tone like every other phrase.
+    // Pitch-only, draw-free, applied to the returned phrase notes: the
+    // builder's Markov state (degree_) is deliberately left on the un-edited
+    // cadence so no generation state moves (the ending note is snap-ineligible
+    // in pass 2, so the edit sticks). Scales lacking both pitch classes (no 2nd
+    // or 5th to open on) are left unchanged. The closing phrase keeps its own
+    // 4c closed cadence untouched.
+    void openBPhraseCadence(std::vector<PhraseNote>& phrase) const {
+        if (phrase.empty()) return;
+        PhraseNote& last = phrase.back();
+        int best = -1;
+        int bestDist = std::numeric_limits<int>::max();
+        bool bestIsFifth = false;
+        for (int d = 0; d < totalDegrees_; ++d) {
+            const int pc = pitchClassOf(d);
+            const bool isFifth = (pc == 7);
+            if (!isFifth && pc != 2) continue;
+            const int dist = std::abs(d - last.degree);
+            if (dist < bestDist ||
+                (dist == bestDist && isFifth && !bestIsFifth)) {
+                best = d;
+                bestDist = dist;
+                bestIsFifth = isFifth;
+            }
+        }
+        if (best < 0 || best == last.degree) return;
+        last.degree = best;
+        last.noteNumber = scale_.noteAt(best, options_.octaveSpan);
+    }
+
     // Pass 2 of the 4a two-pass. Pass 1 (the walk + flatten above) established
     // every note's REAL emitted start beat, including rests and ornaments; here
     // we re-decide the strong beat and chord-tone snap against THAT beat rather
@@ -1284,6 +1318,9 @@ Melody generatePhrased(const BrightnessGrid& grid, const Scale& scale,
         } else {
             phrase = builder.walkPhrase(motifLen, /*newRegion=*/true,
                                         /*tonicFifthEnding=*/true);  // B
+            // Variant C (C-3): B ends open (degree 2/5, half-cadence function)
+            // so the A return reads as the answer, not an arbitrary restart.
+            builder.openBPhraseCadence(phrase);
         }
         bodyNotes += static_cast<int>(phrase.size());
         phrases.push_back(std::move(phrase));
