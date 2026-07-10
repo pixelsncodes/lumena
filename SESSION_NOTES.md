@@ -1,3 +1,36 @@
+# ARM-1 ACCEPTED AND MERGED — verdict + merge record
+
+**Human ear verdict (on the `auditions/ablation/` 12-file grid, committed at
+`ec1d4c2` on `feature/bphrase-variant-c`):** ARM-1 (C-1 + C-3) audibly ≈
+baseline, not worse; the measurable register gain stands. **C-2 (contour
+mirror) rejected permanently.** C-full had previously failed the ear test;
+the ablation isolated C-2 as the harmful component (`ABLATION_REPORT.md`).
+
+- **Merge:** `ablation/arm1-c1c3` (tip `c3162d6`) → `feature/motif-phrasing`
+  (the primary work branch, the one `feature/bphrase-register-rein` was cut
+  from), merge commit `c10a31e`, no squash, no rebase. Merged tree verified
+  byte-identical to `c3162d6`. Brings, in order: Variant B register rein
+  (`9086ae9`, part of the accepted register gain), S-1 scoreboard, C-1
+  related-region read window (W=2), C-3 open B cadence + its role-aware test
+  re-baseline, S-4 register columns.
+- **Gates at the merged tip (fresh Release build):** suite **22526/22526
+  green**; determinism checkerboard seed 2024 ×2 → MIDI+dump byte-identical,
+  and byte-identical to the gated ARM-1 artifacts from the ablation session.
+- **Scope:** deliberate pitch re-baseline. Stream-exactness held at `--arp 0`
+  (61 seeds × both fixtures, onsets/durations/velocities byte-identical);
+  with default ornaments, rhythm shifts on ~12.3% of seeds via the
+  PRE-EXISTING `maybeOrnament` pitch→draw coupling (re-baseline scope, cured
+  in Phase 4.5; coupling untouched).
+- **Docs:** `ABLATION_REPORT.md` (with closing addendum) and
+  `VARIANT_C_REPORT.md` brought onto this branch so the merge message's
+  references resolve. No branch or tag deleted; `feature/bphrase-variant-c`,
+  both arm branches, and `ablation/baseline-metrics` remain as history.
+- **Status:** b-phrase wander item reclassified **REDUCED, NOT CLOSED**.
+  Phase 4.5 remains closed. Parent repo: single commissioned submodule-pointer
+  commit follows this one; no other parent file touched, no VST rebuild.
+
+---
+
 # Phase 4 tail — B-phrase pass · Variant B raw per-note diff (read-only)
 
 Direct MIDI note dump of the two audition renders (both hashes verified:
