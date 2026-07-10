@@ -1,3 +1,25 @@
+# Phase 4.5 — Session 5: ACCEPTED and MERGED (+ padToWholeBars form-bar rule)
+
+Ear verdict: **PASS** — register continuity fixed seed 58's cliff, all four
+audition seeds hold at least as well as the old world, ties accepted, §5
+caveat ratified. Full record in `PHASE45_REPORT.md` §12.
+
+- **Merge:** `feature/clock-unification` → `feature/motif-phrasing`, true
+  merge `a05c92c` (no squash/rebase; branch preserved and pushed).
+- **Post-merge gates, all green:** suite 24069/24069; determinism ×2 both
+  fixtures; coupling-cure pin; M4 median 2.73 / worst 9.67 / 0 over 10 st;
+  reg_b 3.76.
+- **Backlog commit `4186417`:** padToWholeBars ends renders at the form's
+  final bar (last onset-bearing bar; final note keeps min(len,
+  kCadenceBeats) hold). Byte-identical across 346 renders — 4.5-f already
+  killed every reachable sag; now structural. Zero re-pins.
+- **Parent:** single pointer commit on `feature/lumena-melody`.
+  `feature/phase5-minimal-ui` still records the old pointer until its own
+  merge (untouched, per brief).
+- Pushed: submodule `feature/motif-phrasing` + `feature/clock-unification`,
+  parent `feature/lumena-melody`. STOPPED — no Phase 5 merge, no further
+  backlog.
+
 # Phase 4.5 — Session 4: register continuity (4.5-e) + ending sanity (4.5-f) + M4 (STOPPED at ear test)
 
 Branch `feature/clock-unification`, continuing from `9286a3b`. Full detail

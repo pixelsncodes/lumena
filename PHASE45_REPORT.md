@@ -341,3 +341,30 @@ seed 30's ending (drone 7.25→3.25 beats, one bar shorter), seed 70 bar 6
 **Still open for the ear test:** everything §7 said, plus whether the
 per-note fallback's three sweep seeds (30, 44, 46) sound natural where a
 figure's interval shape was traded for register continuity.
+
+## 12. Closing addendum — accepted and merged
+
+**Ear verdict: PASS** (human, the acceptance gate of record): register
+continuity fixed seed 58's cliff; all four audition seeds hold together at
+least as well as the old world; the tied anticipations were accepted; the
+§5 caveat is ratified — the old world's extra coherence was
+double-harmonization artifact, and the honest gains stand per the
+four-state decomposition (§5) and the M4 gate (§11).
+
+Merged to `feature/motif-phrasing` as true merge `a05c92c` (no squash, no
+rebase; `feature/clock-unification` preserved). Post-merge gates at the
+merged tip, all green: suite 24069/24069; determinism ×2 both fixtures
+byte-identical; coupling-cure pin green; M4 median 2.73 / worst single
+jump 9.67 / 0 seeds over 10 st; reg_b 3.76 (≤ ~4.9 holds).
+
+One backlog commit follows the merge on `feature/motif-phrasing`
+(`4186417`): `padToWholeBars` now targets the musical form's final bar
+(last onset-bearing bar) instead of ceiling the last note-off, with the
+final note keeping min(own length, kCadenceBeats) of hold. Measured
+byte-identical across 346 renders — 4.5-f had already extinguished every
+reachable sag case; the rule makes that structural. Suite needed zero
+re-pins.
+
+Parent pointer moved on `feature/lumena-melody` (the single commissioned
+parent write). `feature/phase5-minimal-ui` still records the old pointer
+and builds against it until its own merge.
