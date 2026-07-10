@@ -1,3 +1,40 @@
+# Phase 4.5 — Sessions 2+3: clock unification BUILT (B+C complete; STOPPED at ear test)
+
+Branch `feature/clock-unification` off tag `pre-clock-unification`
+(`cc66e81`). Full detail in `PHASE45_REPORT.md`; auditions in
+`auditions/phase45/`. Nothing merged; parent untouched. NEW-WORLD
+re-baseline as commissioned — the old byte canary is void across 4.5-b.
+
+- **Commits (each gated: suite green, determinism ×2 both fixtures,
+  invariants):** 4.5-a coupling cure (`7eaddb2`, arp-0 byte-identical to the
+  tag — proven, 122/122), demo phrase column (`919127d`, G4), 4.5-b one
+  clock (`4f0b1a4`, walk+flatten fused, plan-then-walk, pass 2 + both
+  fictional clocks + cursor + gradient draw deleted, endings on REAL bars —
+  suite needed ZERO re-pins), 4.5-c tied anticipation (`731c771`, sliver→tie
+  rule, bar-line crossings now real), 4.5-d phrase-entry accent (`1f37a0e`,
+  the old accidental anchor as a stated rule, pitch-only).
+- **THE CURE, proven:** permanent test (influence 0↔0.9, 40 seeds, ornaments
+  ON ⇒ timing/velocity byte-equal) + at-scale check on ARM-1's full rider
+  set: **15/15 seeds, zero rhythm shifts, rider 12.3% → 0%.** Structural:
+  the timing skeleton is decided before any pitch exists.
+- **Verification battery:** 61 seeds × both fixtures — determinism 244/244
+  dump-pairs byte-identical; invariants 122/122 (960-grid, monophony,
+  phrase form, tonic cadence, bar counts). Suite 24069/24069.
+- **C.3 gate (B-phrase survival) — PASS with measured caveat:** 180-seed
+  four-state table: no-fix 5.40 / old ARM-1 4.42 / new 4.88 / new-with-C-1-
+  disabled 5.36. So C-1 verifiably still delivers (disable ⇒ collapse to
+  baseline); the old world's extra ~0.45 st was its double-harmonization
+  artifact (pass-1 fictional snaps under pass-2 real snaps), unreproducible
+  honestly. Tripwire 0/60. M1 reported, not gated.
+- **Auditions:** `auditions/phase45/mona-seed{30,2024,58,70}-{old,new}world
+  .mid` (110 BPM). Seed 70 = tied-anticipation showcase (note @23.75 holds
+  through bar 6). NOT pitch-only pairs — two worlds, listen comparatively.
+- **Ear test = the acceptance gate. STOP here.** If B-relatedness reads
+  weaker: honest levers are W or a real register rule, never the old
+  double-harmonization (report §10).
+
+---
+
 # Phase 4.5 — Session 1/3: clock trace (read-only, docs only)
 
 Deliverable: `CLOCK_TRACE.md` at this tip (`feature/motif-phrasing`). No
