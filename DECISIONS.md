@@ -35,3 +35,30 @@ it; the honest clock alone gave 5.10). New rule, stated rather than
 accidental: a walked phrase's entry note is an accent point (agogic accent),
 snap-eligible exactly like a real integer beat. Pitch-only — the snap coin
 was already drawn unconditionally per note, so draw consumption is untouched.
+
+## Phase 4.5-e — register continuity: fold hierarchy and bands
+Bands: a bar's pitch centroid stays within 6 st of the previous non-empty
+bar's (A-family/closing), 9 st for B phrases (deliberate contrast breathes
+wider). Enforcement is a hierarchy, gentlest first: (1) walk compass — a
+phrase's drawn degrees clamp post-draw to ±4 scale degrees around its entry
+note, one phrase = one register; (2) whole-phrase octave fold toward the
+previous emitted bar's centroid (interval- and pitch-class-preserving);
+(3) per-bar rescue on the emitted timeline, where the FINAL PHRASE folds as
+one atomic group (approach + held tonic + density pieces never separate) and
+a bar whose whole-octave fold cannot fit the scale range folds its
+out-of-band notes individually (pc-preserving; fires only when the
+interval-preserving fold is impossible — the brief's clamp-at-emission,
+chosen over a raw clamp because octave moves keep pitch classes). When a
+fold relocates the closing cadence, the 4c approach rule (leading tone when
+the scale spells one, else nearest step) is re-run on the folded geometry —
+a cadence built at the range bottom chose its contour from that geometry,
+so the choice must be re-made, not transplanted. All parts are post-draw,
+draw-free, pitch-only.
+
+## Phase 4.5-f — terminal cadence trim
+On the looping path only: the final cadence trims to the last bar line it
+already crosses whenever that leaves ≥ kCadenceBeats (2.0) of hold —
+otherwise padToWholeBars (untouched) balloons a fractional overshoot into a
+whole extra bar of drone (seed 30 Mona: 7.25-beat terminal, 11 bars). Trim
+never extends, never moves an onset; worst remaining terminal is bounded
+under beatsPerBar + 2 (measured worst 5.25 beats over 60 seeds).

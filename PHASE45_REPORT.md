@@ -230,3 +230,114 @@ commissioned.
   harmonization.
 - Resume checkpoint: every commit on `feature/clock-unification` is
   individually gated; `pre-clock-unification` tags the last old-world state.
+
+## 11. Addendum — 4.5-e register continuity + 4.5-f ending sanity (session 4)
+
+Commissioned after PM MIDI analysis of `auditions/phase45/` found the old
+clock's double harmonization had acted as a piece-wide register glue, and
+that seed 30 grew 9→11 bars with a 7.25-beat terminal drone. Three commits
+on this branch: `da4d09d` (4.5-e), `b5e4bd4` (4.5-f), `cada2d7` (M4 metric).
+
+**Session inheritance, stated plainly:** this session found an uncommitted,
+unfinished 4.5-e implementation in the working tree (a prior session ended
+before completing it — it did not compile; `kFoldEdgeMargin` was
+undeclared). It was reviewed line-by-line, completed, corrected (the
+original per-bar rescue could separate the cadence pair across a fold, and
+up-folding a bottom-built cadence broke the suite's leading-tone pin), and
+only then gated and committed.
+
+### 4.5-e as built (pitch-only, draw-free — stated rule)
+
+Each bar's emitted register centroid stays within a band of the prior
+non-empty bar's: 6 st for A-family/closing, 9 st for B phrases (contrast
+breathes wider). Three cooperating parts, gentlest first: a ±4-degree walk
+compass around each phrase's entry note (post-draw clamp; ornament figures
+stay inside their phrase's window), a whole-phrase octave fold toward the
+previous emitted bar's centroid, and a per-bar rescue on the emitted
+timeline. The final phrase folds atomically (a fold can never separate the
+approach note from its resolution or split a density-split drone), and when
+a fold relocates the closing cadence the 4c approach rule (leading tone
+below when the scale spells one, else nearest step) is re-run on the folded
+geometry. A bar whose whole-octave fold cannot fit the scale range folds
+its out-of-band notes individually — pc-preserving, fires only when the
+interval-preserving fold is impossible (3/60 sweep seeds). DECISIONS.md
+carries the full rationale.
+
+### 4.5-f: the seed-30 trace (commissioned question) and the trim
+
+- **9→10 bars: legitimate 4.5-b re-baseline.** The one-clock timing plan
+  places the closing phrase's onsets at beats 35.5/36/36.75 — bar 10 exists
+  because the cadence *starts* in it. Onsets were not touched.
+- **10→11 bars + the 7.25-beat drone: a pad artifact, fixed.** The drawn
+  4-beat hold (36.75→40.75) overshot the bar-10 line by 0.75, so
+  `padToWholeBars` (no-go zone, untouched) had to balloon the note to 44.0.
+  The fix trims the final cadence to the last bar line it already crosses
+  whenever that leaves the suite-pinned ≥2-beat hold; the pad then no-ops.
+  Seed 30: 11→10 bars, terminal 7.25→3.25 beats. Duration-only, loop path
+  only, never extends. Footprint proven vs the 4.5-e tip (122 renders):
+  pitches/onsets/velocities byte-identical, duration diffs confined to the
+  final note of 14 ml / 15 ck seeds. **The drone was old-world too** (old
+  60-seed worst terminal: the same 7.25 beats); after 4.5-f the worst is
+  5.25 (a cadence starting at x.75 keeps its sub-2-beat remainder and pads
+  one bar — bounded < beatsPerBar + 2 by construction).
+- Bars 6–8's repeated sparse 3-note rhythm (also in the PM analysis) is
+  rhythm-template selection — a standing no-go zone, and timing besides;
+  observed, logged, out of this commission's scope.
+
+### M4 (new gating metric) and the decisive table
+
+M4 = adjacent-bar register-centroid jump, bars 1–8, consecutive non-empty
+bars (a rest carries the register, it does not reset it); mean + worst
+single jump. Shipped in the demo scoreboard (`--metrics`, sweep CSV columns
+`m4_jump`/`m4_max`, append-only) and cross-checked against an independent
+Python implementation (exact match).
+
+**60 seeds, Mona Lisa, protocol as §5 (all three engine states):**
+
+| state | M4 mean | M4 median | worst single jump | seeds > 10 st | worst terminal | bars histogram |
+|---|---|---|---|---|---|---|
+| old world (`pre-clock-unification`) | 3.62 | 3.63 | 17.33 | 16/60 | 7.25 b | {8:20, 9:24, 10:8, 11:3, 12:5} |
+| new world pre-fix (`9286a3b`) | 4.00 | 3.75 | 17.67 | 20/60 | 7.25 b | {8:14, 9:27, 10:10, 11:6, 12:3} |
+| **new world fixed (tip)** | **2.71** | **2.73** | **9.67** | **0/60** | **5.25 b** | {8:23, 9:22, 10:7, 11:5, 12:3} |
+
+The commissioned gate — M4 at or below old-world levels (median ≤ ~4.0, no
+seed's max single jump > 10 st) — **passes with margin**, and exposes that
+the old world's glue was itself leaky: 16/60 old-world seeds jump > 10 st.
+The stated rule out-performs the accident it replaces.
+
+Audition seeds, M4 mean pre-fix → fixed: 30: 3.85→3.02 (max 9.3→6.0),
+58: 5.75→2.97 (max 13.2→7.4), 70: 4.57→2.81 (max 8.3→5.5),
+2024: 4.36→3.01 (max 8.2→7.8).
+
+**Scoreboard survival (60-seed means, old world → new fixed):** M1 front
+0.603→0.589, back 0.716→0.703, dist(A′) 0.176→0.175, dist(B) 0.786→0.774
+(B still contrasts), M2 excursion 4.74→3.31, M3 Δ +0.28→+0.29, reg(A′)
+2.09→2.28, **reg_b 4.35→3.76** (C.3 gate ≤ ~4.9 holds; the honest clock +
+stated rule now beats the old world's double-harmonization number),
+over-coherence tripwire 0/60→0/60. The coupling-cure pin
+(`test_pitch_domain_never_shifts_timing`) stays green.
+
+### Gates (per commit, all green)
+
+Suite 24069/24069 at every commit (the 4.5-e leading-tone interaction was
+fixed in design, not by re-pinning — zero test changes this session).
+Determinism ×2 both fixtures at every commit. 4.5-e canary vs `9286a3b`:
+61 seeds × both fixtures, default ornaments — note counts, onsets,
+durations, velocities all byte-identical (the coupling cure held; rider
+0%), pitch-only diffs (ck 61, ml 59 seeds); arp-0 stream-exactness
+122/122. 4.5-f footprint as above. M4 commit G4: 122/122 renders
+byte-identical. Invariants at tip: 37 notes / 7 phrases / ck 8 + ml 9
+bars / tonic cadence pc 9 (ck), 0 (ml) — unchanged throughout.
+
+### Deliverables
+
+`auditions/phase45/` refreshed: the four `*-newworld.mid` regenerated at
+the fixed tip (old-world files verified byte-identical to their protocol:
+`--mode phrased --length 32 --loop-bars 8 --tempo 110`); `phase45.zip`
+repacked to match. Listen for: seed 58 bar 5–7 (the 13 st teleport, gone),
+seed 30's ending (drone 7.25→3.25 beats, one bar shorter), seed 70 bar 6
+(the tied anticipation showcase survives untouched).
+
+**Still open for the ear test:** everything §7 said, plus whether the
+per-note fallback's three sweep seeds (30, 44, 46) sound natural where a
+figure's interval shape was traded for register continuity.

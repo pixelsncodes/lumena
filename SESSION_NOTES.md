@@ -1,3 +1,35 @@
+# Phase 4.5 — Session 4: register continuity (4.5-e) + ending sanity (4.5-f) + M4 (STOPPED at ear test)
+
+Branch `feature/clock-unification`, continuing from `9286a3b`. Full detail
+in `PHASE45_REPORT.md` §11; refreshed auditions in `auditions/phase45/`.
+Nothing merged; parent untouched.
+
+- **Inheritance:** the working tree held an uncommitted, non-compiling
+  4.5-e draft from a prior session. Reviewed, completed, and corrected
+  (cadence-pair fold separation; bottom-built cadence up-folds breaking the
+  leading-tone pin) before gating. Stated in the report.
+- **Commits (each gated: suite 24069/24069, determinism ×2 both fixtures,
+  invariants):**
+  - `da4d09d` re-baseline(4.5-e) — the stated register rule: 6 st band
+    (9 st for B), walk compass ±4 degrees, whole-phrase octave folds,
+    per-bar rescue with an atomic final-phrase group and a post-fold
+    cadence-approach retune. Canary vs `9286a3b`: timing/velocities
+    byte-identical 122/122 (default ornaments AND arp-0), pitch-only.
+  - `b5e4bd4` re-baseline(4.5-f) — final cadence trims to the bar line it
+    crosses when ≥ 2 beats of hold remain; seed 30: 11→10 bars, terminal
+    7.25→3.25 b. Seed-30 9→11 trace: 9→10 legitimate 4.5-b onsets,
+    10→11 pad artifact (fixed). padToWholeBars untouched.
+  - `cada2d7` metrics — M4 (mean + worst adjacent-bar centroid jump,
+    bars 1–8) in `--metrics` and the sweep CSV (append-only). G4 122/122.
+- **Gate result (60 seeds Mona):** M4 median 3.63 (old) / 3.75 (pre-fix) →
+  **2.73**; seeds with a single jump > 10 st: 16 / 20 → **0**; worst jump
+  17.67 → 9.67; reg_b 4.35 (old) → **3.76** (≤ ~4.9 holds); tripwire 0/60;
+  coupling-cure pin green. The stated rule beats the old world's
+  accidental glue on every register metric.
+- **STOP:** ear test on refreshed `auditions/phase45/` is the acceptance
+  gate. Listen notes in report §11 (incl. the three per-note-fallback
+  seeds 30/44/46).
+
 # Phase 4.5 — Sessions 2+3: clock unification BUILT (B+C complete; STOPPED at ear test)
 
 Branch `feature/clock-unification` off tag `pre-clock-unification`
