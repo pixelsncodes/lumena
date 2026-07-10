@@ -106,6 +106,31 @@ constexpr float kContourSlopeThreshold = 0.03f;
 // purpose — an audition constant, not a user control.
 constexpr int kTeleportWindowBase = 2;
 constexpr int kTeleportWindowRefColumns = 16;
+// Phase 4.5-e (register continuity, stated rule): each bar's emitted register
+// stays within a band of the bar before it. The old two-clock engine glued the
+// whole piece's register together by accident (its double harmonization
+// re-snapped every fictionally-strong note toward home chord tones); the honest
+// clock removed that glue and adjacent bars started teleporting (measured: mean
+// adjacent-bar centroid jump grew ~2.4->4.5 st on affected seeds). The rule is
+// enforced pitch-only, draw-free, in three cooperating parts:
+//   1. a walked phrase's notes keep within +/- kPhraseCompassDegrees scale
+//      degrees of the phrase's entry note (post-draw clamp in walkDegreesAt),
+//      so one phrase cannot straddle two registers;
+//   2. at emission each phrase is octave-folded toward the previous emitted
+//      bar's pitch centroid when its own centroid strays past the band
+//      (whole-phrase fold: pitch classes, intervals, chord snaps and cadence
+//      function are all preserved);
+//   3. a final per-bar rescue pass folds any bar still out of band (folds are
+//      skipped when the scale range cannot absorb a whole octave).
+// B phrases are deliberate register contrast, so they breathe in a wider band.
+constexpr double kRegisterBandA = 6.0;  // st: A-family + closing phrases
+constexpr double kRegisterBandB = 9.0;  // st: B phrases (contrast breathes wider)
+constexpr int kPhraseCompassDegrees = 4;
+// Rescue folds (part 3) keep one degree of headroom at each scale edge so a
+// folded bar never parks on the extreme degree — the walk and cadence logic
+// still have somewhere to move. Whole-phrase folds (part 2) need no margin:
+// they only relocate a phrase the walk already shaped inside the range.
+constexpr int kFoldEdgeMargin = 1;
 
 }  // namespace
 
@@ -433,6 +458,7 @@ public:
         const double complexity = clampUnit(options_.arpeggioAmount);
         std::vector<PhraseNote> phrase;
         phrase.reserve(cells.size());
+        int entryDegree = -1;  // 4.5-e compass anchor: the phrase's first note
         for (std::size_t i = 0; i < cells.size(); ++i) {
             const bool ending = tonicFifthEnding && i + 1 == cells.size();
             const long tick = startTicks[i];
@@ -472,6 +498,20 @@ public:
                                      (2 + static_cast<int>(uni01() * 2.0));
                     next = clampDegree(next + leap);
                 }
+                // Register continuity (4.5-e, part 1): a phrase is one gesture
+                // in one register — clamp the drawn degree into the compass
+                // around the phrase's entry note. Post-draw remap of the
+                // already-sampled value (every draw above is consumed
+                // unconditionally), so the stream is untouched; the image
+                // target can still bend the line, it just can't teleport it
+                // an octave mid-phrase. Applied before the chord snap so the
+                // snapped tone also lands inside the compass.
+                if (entryDegree >= 0) {
+                    if (next < entryDegree - kPhraseCompassDegrees)
+                        next = clampDegree(entryDegree - kPhraseCompassDegrees);
+                    if (next > entryDegree + kPhraseCompassDegrees)
+                        next = clampDegree(entryDegree + kPhraseCompassDegrees);
+                }
                 // Strong beats prefer a chord tone; the coin stays
                 // unconditional (4a-0) so the stream is classification-free.
                 const double snapCoin = uni01();
@@ -488,6 +528,7 @@ public:
             }
             PhraseNote note;
             note.degree = static_cast<int>(degree_);
+            if (entryDegree < 0) entryDegree = note.degree;
             note.noteNumber = scale_.noteAt(note.degree, options_.octaveSpan);
             note.brightness = cells[i].brightness;
             note.col = cells[i].col;
@@ -716,23 +757,44 @@ public:
         const PhraseNote src = phrase[site];
         const int dirDraw = plan.dirDraw;
         const double each = plan.each;
+        // Register continuity (4.5-e): the figure stays inside the phrase's
+        // register — the compass window around the walked notes, stretched by
+        // the figure's own 2-degree step. A figure that dives an octave out of
+        // its phrase was measured to teleport that bar's centroid.
+        int phraseLo = std::numeric_limits<int>::max();
+        int phraseHi = std::numeric_limits<int>::min();
+        for (const PhraseNote& n : phrase) {
+            phraseLo = std::min(phraseLo, n.degree);
+            phraseHi = std::max(phraseHi, n.degree);
+        }
+        const int windowLo = phraseLo - 2;
+        const int windowHi = phraseHi + 2;
         // Direction: the drawn value decides when both sides have room for the
-        // 0-2-4 span; one-sided room overrides it (unchanged musical rule).
-        // When NEITHER side has full room (only possible below 8 usable
-        // degrees — never at the shipped span-2 scales) the figure is CLAMPED
-        // into range instead of skipped, so whether a figure exists — and thus
-        // the emitted note count — never depends on pitch (4.5-a; DECISIONS).
+        // 0-2-4 span; one-sided room overrides it (unchanged musical rule),
+        // and 4.5-e adds the stronger preference for a direction that also
+        // stays inside the phrase window. When NEITHER side has full room
+        // (only possible below 8 usable degrees — never at the shipped span-2
+        // scales) the figure is CLAMPED into range instead of skipped, so
+        // whether a figure exists — and thus the emitted note count — never
+        // depends on pitch (4.5-a; DECISIONS).
         const bool ascOk = src.degree + 4 < totalDegrees_;
         const bool descOk = src.degree - 4 >= 0;
-        const bool ascending =
-            (ascOk || descOk) ? (ascOk && (!descOk || dirDraw == 0))
-                              : (dirDraw == 0);
+        const bool ascFits = ascOk && src.degree + 4 <= windowHi;
+        const bool descFits = descOk && src.degree - 4 >= windowLo;
+        bool ascending;
+        if (ascFits || descFits) {
+            ascending = ascFits && (!descFits || dirDraw == 0);
+        } else {
+            ascending = (ascOk || descOk) ? (ascOk && (!descOk || dirDraw == 0))
+                                          : (dirDraw == 0);
+        }
         const int step = ascending ? +2 : -2;
 
         std::vector<PhraseNote> figure;
         figure.reserve(3);
         for (int k = 0; k < 3; ++k) {
-            const int deg = clampDegree(src.degree + step * k);
+            const int deg = clampDegree(
+                std::clamp(src.degree + step * k, windowLo, windowHi));
             PhraseNote n;
             n.degree = deg;
             n.noteNumber = scale_.noteAt(deg, options_.octaveSpan);
@@ -1267,6 +1329,19 @@ Melody generatePhrased(const BrightnessGrid& grid, const Scale& scale,
 
     long tick = 0;  // THE clock: real emitted ticks (960/beat) from 0
 
+    // Register continuity (4.5-e): running per-bar pitch ledger of everything
+    // emitted so far, so each phrase can be folded toward the register the
+    // piece just left. Updated in emitPhrase; read by the fold below.
+    const long ticksPerBar = std::lround(
+        static_cast<double>(kTicksPerBeat) *
+        (options.beatsPerBar > 0.0 ? options.beatsPerBar : 4.0));
+    const int degreesPerOctave = static_cast<int>(scale.degreesPerOctave());
+    std::vector<double> barPitchSum;
+    std::vector<long> barPitchCount;
+    // Set when a register fold relocates the closing cadence; the approach
+    // note is then retuned against the folded geometry after part 3.
+    bool cadenceFolded = false;
+
     // Deterministic timing plan for one phrase. `templatedFlags`/`ownLens`
     // describe the pre-ornament notes (walked notes are all templated with a
     // 1.0-beat Straight length; copied phrases bring their own fields);
@@ -1378,10 +1453,69 @@ Melody generatePhrased(const BrightnessGrid& grid, const Scale& scale,
                 melody.dbgStrong.push_back(primary && pn.dbgStrong ? 1 : 0);
                 melody.dbgSnapped.push_back(primary && pn.dbgSnapped ? 1 : 0);
                 melody.dbgChordRoot.push_back(primary ? pn.dbgChordRoot : -1);
+                // 4.5-e ledger: every emitted piece votes in its real bar.
+                const long bar =
+                    ticksPerBar > 0 ? (s.startTick + k * pieceTicks) / ticksPerBar
+                                    : 0;
+                if (static_cast<std::size_t>(bar) >= barPitchCount.size()) {
+                    barPitchCount.resize(static_cast<std::size_t>(bar) + 1, 0);
+                    barPitchSum.resize(static_cast<std::size_t>(bar) + 1, 0.0);
+                }
+                barPitchSum[static_cast<std::size_t>(bar)] += note.noteNumber;
+                ++barPitchCount[static_cast<std::size_t>(bar)];
             }
         }
         if (!slots.empty())
             tick = slots.back().startTick + slots.back().durTicks;
+    };
+
+    // Register continuity (4.5-e, part 2): fold a whole phrase by octaves
+    // toward the register the piece just left. Reference = pitch centroid of
+    // the last non-empty emitted bar at or before the phrase's first sounding
+    // bar; when the phrase's own centroid strays past the band, the whole
+    // phrase shifts by the nearest whole octaves that fit the scale range.
+    // Octave shifts preserve pitch classes and interval content, so chord
+    // snaps, the B phrase's open cadence and the closing tonic all keep their
+    // function. Pitch-only and draw-free; the timing plan never moves.
+    // Returns true when it folded (the caller tracks whether the closing
+    // cadence moved, so the approach note can be retuned after part 3).
+    auto applyRegisterContinuity = [&](const std::vector<EmitSlot>& slots,
+                                       std::vector<PhraseNote>& phrase,
+                                       bool isB) -> bool {
+        if (phrase.empty() || slots.empty() || ticksPerBar <= 0) return false;
+        const long firstBar = slots.front().startTick / ticksPerBar;
+        int refBar = -1;
+        for (std::size_t b = 0;
+             b < barPitchCount.size() && static_cast<long>(b) <= firstBar; ++b)
+            if (barPitchCount[b] > 0) refBar = static_cast<int>(b);
+        if (refBar < 0)
+            return false;  // phrase 0: nothing emitted yet, no reference
+        const double ref = barPitchSum[static_cast<std::size_t>(refBar)] /
+                           static_cast<double>(
+                               barPitchCount[static_cast<std::size_t>(refBar)]);
+        double cur = 0.0;
+        for (const PhraseNote& n : phrase) cur += n.noteNumber;
+        cur /= static_cast<double>(phrase.size());
+        const double band = isB ? kRegisterBandB : kRegisterBandA;
+        const double diff = cur - ref;
+        if (std::fabs(diff) <= band) return false;
+        long k = std::lround(diff / 12.0);
+        while (k != 0) {
+            bool fits = true;
+            for (const PhraseNote& n : phrase) {
+                const int d = n.degree - static_cast<int>(k) * degreesPerOctave;
+                if (d < 0 || d >= totalDegrees) { fits = false; break; }
+            }
+            if (fits) {
+                for (PhraseNote& n : phrase) {
+                    n.degree -= static_cast<int>(k) * degreesPerOctave;
+                    n.noteNumber = scale.noteAt(n.degree, options.octaveSpan);
+                }
+                return true;
+            }
+            k += (k > 0) ? -1 : 1;  // a smaller fold may still fit the range
+        }
+        return false;
     };
 
     // Inter-phrase rest, decided FIRST in each phrase's block so the phrase's
@@ -1445,6 +1579,8 @@ Melody generatePhrased(const BrightnessGrid& grid, const Scale& scale,
         if (isB) builder.openBPhraseCadence(phrase);
         if (closing) builder.finishClosingPhrase(phrase, cadenceLen);
         if (orn.fired) builder.spliceOrnamentFigure(phrase, site, orn);
+        if (applyRegisterContinuity(plan.slots, phrase, isB) && closing)
+            cadenceFolded = true;
         builder.applyPhraseDynamics(phrase, /*finalPhrase=*/closing);
         emitPhrase(plan.slots, phrase);
     };
@@ -1481,6 +1617,7 @@ Melody generatePhrased(const BrightnessGrid& grid, const Scale& scale,
         PhrasePlan plan = planTiming(count, orn, site, /*closing=*/false, 0.0,
                                      templatedFlags, ownLens, contrasts);
         if (orn.fired) builder.spliceOrnamentFigure(phrase, site, orn);
+        applyRegisterContinuity(plan.slots, phrase, /*isB=*/false);
         builder.applyPhraseDynamics(phrase, /*finalPhrase=*/false);
         emitPhrase(plan.slots, phrase);
     };
@@ -1515,6 +1652,170 @@ Melody generatePhrased(const BrightnessGrid& grid, const Scale& scale,
     maybeRest();
     processWalked(/*newRegion=*/false, /*isB=*/false, /*closing=*/true,
                   /*isMotif=*/false);
+
+    // Register continuity (4.5-e, part 3): per-bar rescue. The phrase folds
+    // above keep whole phrases coherent, but a bar shared by two phrases (or a
+    // phrase whose compass still spans a boundary) can end up out of band.
+    // Walk the emitted bars in order against a running reference — the
+    // previous non-empty bar's (post-fold) centroid — and fold any offender by
+    // the nearest whole octaves that fit the scale range. Same stated rule,
+    // now guaranteed on the emitted timeline itself. Two refinements:
+    //   - The FINAL PHRASE (closing walk + cadence, including any density
+    //     pieces of the held tonic) folds as one atomic group, so no fold can
+    //     separate the approach note from its resolution or split the drone.
+    //   - When a whole-bar fold cannot fit the scale range (one low note
+    //     pinning a bar whose others sit an octave out), the out-of-band notes
+    //     that DO fit fold individually. That trades the bar's interval shape
+    //     for register continuity — the brief's sanctioned clamp-at-emission,
+    //     done as pitch-class-preserving octave moves; it fires only when the
+    //     interval-preserving fold is impossible.
+    if (ticksPerBar > 0 && !melody.notes.empty() &&
+        !melody.phraseStarts.empty()) {
+        // A bar breathes in the wider band when any of its notes belongs to a
+        // B phrase (interior even phrase index; the last phrase is closing).
+        const std::size_t phraseCount = melody.phraseStarts.size();
+        auto phraseOf = [&](std::size_t i) {
+            std::size_t p = 0;
+            for (std::size_t q = 0; q < phraseCount; ++q)
+                if (melody.phraseStarts[q] <= i) p = q;
+            return p;
+        };
+        auto foldGroup = [&](const std::vector<std::size_t>& idx, double cur,
+                             double ref, double band) {
+            const double diff = cur - ref;
+            if (std::fabs(diff) <= band) return cur;
+            long k = std::lround(diff / 12.0);
+            while (k != 0) {
+                bool fits = true;
+                for (std::size_t i : idx) {
+                    const int d = melody.degrees[i] -
+                                  static_cast<int>(k) * degreesPerOctave;
+                    if (d < kFoldEdgeMargin ||
+                        d >= totalDegrees - kFoldEdgeMargin) {
+                        fits = false;
+                        break;
+                    }
+                }
+                if (fits) {
+                    for (std::size_t i : idx) {
+                        melody.degrees[i] -=
+                            static_cast<int>(k) * degreesPerOctave;
+                        melody.notes[i].noteNumber = scale.noteAt(
+                            melody.degrees[i], options.octaveSpan);
+                    }
+                    return cur - 12.0 * static_cast<double>(k);
+                }
+                k += (k > 0) ? -1 : 1;  // a smaller fold may still fit
+            }
+            return cur;  // no interval-preserving fold fits
+        };
+        const std::size_t tailStart = melody.phraseStarts.back();
+        std::vector<std::vector<std::size_t>> byBar;
+        for (std::size_t i = 0; i < tailStart; ++i) {
+            const long bar = std::lround(melody.notes[i].startBeats *
+                                         kTicksPerBeat) /
+                             ticksPerBar;
+            if (static_cast<std::size_t>(bar) >= byBar.size())
+                byBar.resize(static_cast<std::size_t>(bar) + 1);
+            byBar[static_cast<std::size_t>(bar)].push_back(i);
+        }
+        double ref = -1.0;  // no previous bar yet
+        for (const std::vector<std::size_t>& idx : byBar) {
+            if (idx.empty()) continue;  // rest bar: reference carries over
+            double cur = 0.0;
+            bool anyB = false;
+            for (std::size_t i : idx) {
+                cur += melody.notes[i].noteNumber;
+                const std::size_t p = phraseOf(i);
+                if (p % 2 == 0 && p != 0 && p + 1 != phraseCount) anyB = true;
+            }
+            cur /= static_cast<double>(idx.size());
+            if (ref >= 0.0) {
+                const double band = anyB ? kRegisterBandB : kRegisterBandA;
+                cur = foldGroup(idx, cur, ref, band);
+                if (std::fabs(cur - ref) > band) {
+                    // Whole-bar fold blocked by the scale range: fold the
+                    // out-of-band notes that fit, one octave toward ref.
+                    const int dir = cur > ref ? 1 : -1;  // 1 = fold down
+                    double sum = 0.0;
+                    for (std::size_t i : idx) {
+                        int deg = melody.degrees[i];
+                        // Only notes out of band on the bar's excess side —
+                        // folding an opposite-side outlier would push it
+                        // further from the reference.
+                        while (dir * (scale.noteAt(deg, options.octaveSpan) -
+                                      ref) > band) {
+                            const int d = deg - dir * degreesPerOctave;
+                            if (d < kFoldEdgeMargin ||
+                                d >= totalDegrees - kFoldEdgeMargin)
+                                break;
+                            deg = d;
+                        }
+                        if (deg != melody.degrees[i]) {
+                            melody.degrees[i] = deg;
+                            melody.notes[i].noteNumber =
+                                scale.noteAt(deg, options.octaveSpan);
+                        }
+                        sum += melody.notes[i].noteNumber;
+                    }
+                    cur = sum / static_cast<double>(idx.size());
+                }
+            }
+            ref = cur;
+        }
+        // The final phrase, folded as one atomic group against the register
+        // the piece leaves it from. No per-note fallback here: the cadence's
+        // internal shape (approach step, held tonic, density pieces) is worth
+        // more than the last bar's band membership.
+        if (tailStart < melody.notes.size() && ref >= 0.0) {
+            std::vector<std::size_t> tail;
+            double cur = 0.0;
+            for (std::size_t i = tailStart; i < melody.notes.size(); ++i) {
+                tail.push_back(i);
+                cur += melody.notes[i].noteNumber;
+            }
+            cur /= static_cast<double>(tail.size());
+            const double folded = foldGroup(tail, cur, ref, kRegisterBandA);
+            if (folded != cur) cadenceFolded = true;
+        }
+    }
+
+    // Cadence approach retune (4.5-e): a register fold may relocate the final
+    // tonic — in particular lift a cadence built at the range bottom, where
+    // finishClosingPhrase had no step below to use. Re-run the 4c approach
+    // rule on the folded geometry: leading tone below when the scale spells
+    // one, else the nearest neighbouring step. Pitch-only, draw-free, and
+    // skipped when the penultimate note already shares the tonic's pitch
+    // class (a density piece of the held tonic — not an approach note).
+    if (cadenceFolded && melody.notes.size() >= 2) {
+        const std::size_t n = melody.notes.size() - 1;
+        const int tonic = melody.degrees[n];
+        const int finalPc = wrap(melody.notes[n].noteNumber, 12);
+        const int prevPc = wrap(melody.notes[n - 1].noteNumber, 12);
+        const bool aboveOk = tonic + 1 < totalDegrees;
+        const bool belowOk = tonic - 1 >= 0;
+        if (prevPc != finalPc && (aboveOk || belowOk)) {
+            auto pcRel = [&](int degree) {
+                return scale.intervals[static_cast<std::size_t>(
+                           wrap(degree, degreesPerOctave))] % 12;
+            };
+            int stepDegree;
+            if (belowOk && pcRel(tonic - 1) == 11) {
+                stepDegree = tonic - 1;
+            } else if (aboveOk && belowOk) {
+                const int cur = melody.degrees[n - 1];
+                stepDegree = std::abs((tonic + 1) - cur) <=
+                                     std::abs((tonic - 1) - cur)
+                                 ? tonic + 1
+                                 : tonic - 1;
+            } else {
+                stepDegree = aboveOk ? tonic + 1 : tonic - 1;
+            }
+            melody.degrees[n - 1] = stepDegree;
+            melody.notes[n - 1].noteNumber =
+                scale.noteAt(stepDegree, options.octaveSpan);
+        }
+    }
 
     melody.progression = builder.progression();  // carry harmony for Lock Harmony
     return melody;
