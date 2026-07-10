@@ -1987,10 +1987,60 @@ void test_strong_beat_tick_grid() {
     }
 }
 
+// Phase 4.5 permanent pin — the pitch->draw coupling cure. Pitch-domain
+// inputs must never influence draw consumption or the timing/dynamics stream:
+// two generations differing ONLY in image influence (a pure pitch-domain
+// input — it moves nextBiased targets and varyMotif's image-vs-random choice,
+// nothing else) must emit the same note count and byte-identical startBeats,
+// lengthBeats and velocities. Pitches are expected to differ — that is the
+// knob working; asserted so the test cannot silently pass by comparing a
+// melody with itself. Ornaments are ON (0.15) so the historically-coupled
+// path (maybeOrnament's dirPick/shape draws and figure splice) is exercised.
+// Before 4.5-a this fails on rider seeds; it must never fail again.
+void test_pitch_domain_never_shifts_timing() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = minorPentatonic();
+
+    bool anyPitchDiff = false;
+    for (unsigned seed = 1; seed <= 40; ++seed) {
+        MelodyOptions a;
+        a.phraseMode = PhraseMode::Phrased;
+        a.rhythm = RhythmMode::Flowing;
+        a.length = 32;
+        a.loopBars = 8;
+        a.arpeggioAmount = 0.15;
+        MelodyOptions b = a;
+        a.brightnessBias = 0.0;
+        b.brightnessBias = 0.9;
+
+        std::mt19937 r1(seed);
+        std::mt19937 r2(seed);
+        const Melody ma = generateMelody(grid, scale, a, r1);
+        const Melody mb = generateMelody(grid, scale, b, r2);
+
+        CHECK(ma.notes.size() == mb.notes.size());
+        bool streamSame = ma.notes.size() == mb.notes.size();
+        for (std::size_t i = 0; streamSame && i < ma.notes.size(); ++i) {
+            if (ma.notes[i].startBeats != mb.notes[i].startBeats ||
+                ma.notes[i].lengthBeats != mb.notes[i].lengthBeats ||
+                ma.notes[i].velocity != mb.notes[i].velocity) {
+                streamSame = false;
+            }
+            if (ma.notes[i].noteNumber != mb.notes[i].noteNumber) {
+                anyPitchDiff = true;
+            }
+        }
+        CHECK(streamSame);
+    }
+    CHECK(anyPitchDiff);
+}
+
 }  // namespace
 
 void run_melody_generator_tests() {
     test_strong_beat_tick_grid();
+    test_pitch_domain_never_shifts_timing();
     test_random_walk_is_smooth();
     test_velocity_mapping_in_bytes();
     test_rhythm_modes();

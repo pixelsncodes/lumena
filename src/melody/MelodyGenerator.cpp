@@ -580,6 +580,19 @@ public:
         std::uniform_real_distribution<double> coin(0.0, 1.0);
         if (coin(rng_) >= amount) return;
 
+        // Phase 4.5-a (coupling cure): BOTH remaining draws are consumed here,
+        // unconditionally, before any pitch is read — draw consumption is a
+        // function of the coin alone. Previously dirPick hid behind a
+        // src.degree room test and both draws behind a no-room early return,
+        // so upstream PITCH changes shifted the whole downstream stream on
+        // ~5-12% of seeds (the maybeOrnament rider; CLOCK_TRACE.md §2). The
+        // drawn values are applied through the same room logic below.
+        std::uniform_int_distribution<int> dirPick(0, 1);
+        const int dirDraw = dirPick(rng_);
+        // Three straight eighths, or an eighth-note triplet spanning one beat.
+        std::uniform_int_distribution<int> shape(0, 1);
+        const double each = shape(rng_) == 0 ? 0.5 : (1.0 / 3.0);
+
         // Prefer a bright cell; fall back to the brightest note in the phrase.
         std::size_t site = 0;
         bool haveBright = false;
@@ -597,22 +610,23 @@ public:
         }
 
         const PhraseNote src = phrase[site];
-        // Choose a direction that keeps 0-2-4 inside the usable range.
+        // Direction: the drawn value decides when both sides have room for the
+        // 0-2-4 span; one-sided room overrides it (unchanged musical rule).
+        // When NEITHER side has full room (only possible below 8 usable
+        // degrees — never at the shipped span-2 scales) the figure is CLAMPED
+        // into range instead of skipped, so whether a figure exists — and thus
+        // the emitted note count — never depends on pitch (4.5-a; DECISIONS).
         const bool ascOk = src.degree + 4 < totalDegrees_;
         const bool descOk = src.degree - 4 >= 0;
-        if (!ascOk && !descOk) return;  // no room for a figure
-        std::uniform_int_distribution<int> dirPick(0, 1);
-        bool ascending = ascOk && (!descOk || dirPick(rng_) == 0);
+        const bool ascending =
+            (ascOk || descOk) ? (ascOk && (!descOk || dirDraw == 0))
+                              : (dirDraw == 0);
         const int step = ascending ? +2 : -2;
-
-        // Three straight eighths, or an eighth-note triplet spanning one beat.
-        std::uniform_int_distribution<int> shape(0, 1);
-        const double each = shape(rng_) == 0 ? 0.5 : (1.0 / 3.0);
 
         std::vector<PhraseNote> figure;
         figure.reserve(3);
         for (int k = 0; k < 3; ++k) {
-            const int deg = src.degree + step * k;
+            const int deg = clampDegree(src.degree + step * k);
             PhraseNote n;
             n.degree = deg;
             n.noteNumber = scale_.noteAt(deg, options_.octaveSpan);
