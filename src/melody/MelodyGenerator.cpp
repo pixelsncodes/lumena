@@ -1817,6 +1817,31 @@ Melody generatePhrased(const BrightnessGrid& grid, const Scale& scale,
         }
     }
 
+    // Ending sanity (4.5-f): trim the final cadence to the last bar line it
+    // already crosses, provided that still leaves the full cadential hold
+    // (kCadenceBeats). A cadence that overshoots a bar line by a fraction
+    // otherwise forces padToWholeBars (whose contract — seamless whole-bar
+    // loops — is untouched) to balloon it to the NEXT bar line: seed 30 Mona
+    // held 36.75→40.75, padded to 44.0 — a 7.25-beat terminal drone and a
+    // whole extra bar. Trimming to 40.0 keeps the drawn hold's intent (3.25
+    // beats), ends the piece a bar earlier, and the pad becomes a no-op.
+    // Duration-only, draw-free; never extends, never moves an onset. When no
+    // crossed bar line leaves kCadenceBeats of hold, the note is left alone
+    // and the pad still bounds the terminal at under beatsPerBar + 2 beats.
+    // Scoped to the looping path — without padToWholeBars there is no
+    // balloon, and a free-length piece may hold its cadence across a bar.
+    if (options.loopBars > 0 && !melody.notes.empty() &&
+        options.beatsPerBar > 0.0) {
+        Note& last = melody.notes.back();
+        const double end = last.startBeats + last.lengthBeats;
+        const double lastBarLine =
+            std::floor(end / options.beatsPerBar - 1e-9) * options.beatsPerBar;
+        if (lastBarLine > last.startBeats + kCadenceBeats - 1e-9 &&
+            lastBarLine < end - 1e-9) {
+            last.lengthBeats = lastBarLine - last.startBeats;
+        }
+    }
+
     melody.progression = builder.progression();  // carry harmony for Lock Harmony
     return melody;
 }
