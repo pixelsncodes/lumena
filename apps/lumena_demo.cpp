@@ -587,7 +587,11 @@ int main(int argc, char** argv) {
                      // Appended bug-4 diagnostic columns (Phrased Melody only;
                      // -1/0 elsewhere). realStartBeat duplicates startBeat so the
                      // snap-site metric is self-contained on the appended block.
-                     "realStartBeat,was_strong,was_snapped,target_chord_root\n");
+                     "realStartBeat,was_strong,was_snapped,target_chord_root,"
+                     // Phase 4.5: the phrase the note belongs to (from
+                     // Melody::phraseStarts; -1 outside Phrased mode), so the
+                     // invariant harness can assert the A A' B A'' form.
+                     "phrase\n");
         for (std::size_t i = 0; i < notes.size(); ++i) {
             const Note& n = notes[i];
             const int degree =
@@ -610,10 +614,15 @@ int main(int argc, char** argv) {
                 i < melody.dbgSnapped.size() ? melody.dbgSnapped[i] : 0;
             const int chordRoot =
                 i < melody.dbgChordRoot.size() ? melody.dbgChordRoot[i] : -1;
-            std::fprintf(csv, "%zu,%d,%.6f,%.6f,%d,%d,%.6f,%d,%.6f,%d,%d,%d\n", i,
-                         n.noteNumber, n.startBeats, n.lengthBeats, n.velocity,
+            int phraseIdx = -1;
+            for (std::size_t p = 0; p < melody.phraseStarts.size(); ++p) {
+                if (melody.phraseStarts[p] <= i) phraseIdx = static_cast<int>(p);
+            }
+            std::fprintf(csv, "%zu,%d,%.6f,%.6f,%d,%d,%.6f,%d,%.6f,%d,%d,%d,%d\n",
+                         i, n.noteNumber, n.startBeats, n.lengthBeats, n.velocity,
                          degree, srcBrightness, chordTone,
-                         n.startBeats, wasStrong, wasSnapped, chordRoot);
+                         n.startBeats, wasStrong, wasSnapped, chordRoot,
+                         phraseIdx);
         }
         std::fclose(csv);
         std::printf("Wrote notes CSV: %s (%zu rows)\n",
