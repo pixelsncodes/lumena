@@ -138,6 +138,13 @@ struct CoherenceMetrics {
     double m3Front = -1.0;
     double m3Back = -1.0;
     double m3Delta = 0.0;
+    // M4 register continuity (Phase 4.5-e gate): jumps between consecutive
+    // non-empty bars' pitch centroids, bars 1-8. The old clock's double
+    // harmonization glued adjacent bars' registers together by accident;
+    // 4.5-e states the rule, and M4 reads whether it holds on the emitted
+    // timeline. Mean jump plus the single worst jump (the audible teleport).
+    double m4RegJump = -1.0;
+    double m4MaxJump = -1.0;
     // Supplementary register decomposition (S-4 diagnostic): mean |phrase pitch
     // centroid - motif A's centroid| in semitones, split by phrase role. Reads
     // the register relatedness C-1 targets directly, without M2's front-band
@@ -268,6 +275,28 @@ CoherenceMetrics computeCoherenceMetrics(const Melody& melody,
         if (any) m.m2Excursion = worst;
     }
 
+    // M4: adjacent-bar register-centroid jumps, bars 1-8 (indices 0-7).
+    // Consecutive NON-EMPTY bars: a rest bar carries the register across, it
+    // does not reset it. Same convention as M2's centroids above.
+    {
+        double prev = -1.0, sum = 0.0, worst = -1.0;
+        int n = 0;
+        for (std::size_t b = 0; b < std::min(backEnd, centroid.size()); ++b) {
+            if (centroid[b] < 0.0) continue;
+            if (prev >= 0.0) {
+                const double jump = std::fabs(centroid[b] - prev);
+                sum += jump;
+                worst = std::max(worst, jump);
+                ++n;
+            }
+            prev = centroid[b];
+        }
+        if (n > 0) {
+            m.m4RegJump = sum / n;
+            m.m4MaxJump = worst;
+        }
+    }
+
     // M3: entropy over sliding 2-bar windows; front windows live entirely in
     // bars 1-4, back windows entirely in bars 5-8.
     double f3 = 0.0, b3 = 0.0;
@@ -285,17 +314,21 @@ CoherenceMetrics computeCoherenceMetrics(const Melody& melody,
     return m;
 }
 
+// M4 columns append (like `phrase` in the dump CSV) so older index-based
+// parsers keep working.
 const char* kMetricsCsvHeader =
     "seed,notes,bars,m1_front,m1_back,m1_aprime,m1_b,"
-    "m2_excursion,m3_front,m3_back,m3_delta,reg_aprime,reg_b\n";
+    "m2_excursion,m3_front,m3_back,m3_delta,reg_aprime,reg_b,"
+    "m4_jump,m4_max\n";
 
 void writeMetricsCsvRow(std::FILE* f, unsigned seed, std::size_t noteCount,
                         const CoherenceMetrics& m) {
     std::fprintf(f,
-                 "%u,%zu,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n",
+                 "%u,%zu,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
+                 "%.6f,%.6f\n",
                  seed, noteCount, m.bars, m.m1Front, m.m1Back, m.m1APrime,
                  m.m1B, m.m2Excursion, m.m3Front, m.m3Back, m.m3Delta,
-                 m.regAPrime, m.regB);
+                 m.regAPrime, m.regB, m.m4RegJump, m.m4MaxJump);
 }
 
 void printUsage(const char* argv0) {
@@ -553,9 +586,10 @@ int main(int argc, char** argv) {
             std::printf(
                 "Metrics (seed %u): M1 front %.3f back %.3f | dist(A') %.3f "
                 "dist(B) %.3f | M2 excursion %.2f st | M3 front %.3f back %.3f "
-                "delta %+.3f | %d bars\n",
+                "delta %+.3f | M4 jump %.2f max %.2f st | %d bars\n",
                 opts.seed, cm.m1Front, cm.m1Back, cm.m1APrime, cm.m1B,
-                cm.m2Excursion, cm.m3Front, cm.m3Back, cm.m3Delta, cm.bars);
+                cm.m2Excursion, cm.m3Front, cm.m3Back, cm.m3Delta,
+                cm.m4RegJump, cm.m4MaxJump, cm.bars);
         }
         if (!opts.metricsCsvPath.empty()) {
             std::FILE* csv = std::fopen(opts.metricsCsvPath.c_str(), "wb");
