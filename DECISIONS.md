@@ -25,3 +25,13 @@ next slot, as a single MIDI event (tied anticipation). Fragments >= 0.5
 beats remain honest off-beat entries, unchanged. Threshold chosen as the
 smallest template slot value so no emitted templated note is ever shorter
 than the groove's own vocabulary.
+
+## Phase 4.5-d — phrase-entry accent (the register anchor, made explicit)
+The old phrase-relative clock reset `localBeat_` to 0 per walked phrase, so
+every phrase's FIRST note classified "strong" and took the 60% chord-tone
+snap. That was a clock artifact — but it was also the register anchor that
+held B phrases near the motif (the accepted ARM-1 fix's reg_b 4.35 scored on
+it; the honest clock alone gave 5.10). New rule, stated rather than
+accidental: a walked phrase's entry note is an accent point (agogic accent),
+snap-eligible exactly like a real integer beat. Pitch-only — the snap coin
+was already drawn unconditionally per note, so draw consumption is untouched.

@@ -437,7 +437,17 @@ public:
             const bool ending = tonicFifthEnding && i + 1 == cells.size();
             const long tick = startTicks[i];
             updateHarmonyTarget(static_cast<double>(tick) / kTicksPerBeat);
-            const bool strong = (tick % kTicksPerBeat) == 0;
+            // Accent points: integer beats — REAL ones, at last — plus the
+            // PHRASE ENTRY (4.5-d). The entry accent is a stated musical rule
+            // (a phrase's first note is an arrival, wherever the grid puts
+            // it) replacing what the old phrase-relative clock did by
+            // accident: localBeat_'s reset made every walked phrase's first
+            // note "strong", and that 60% chord-snap at the entry was the
+            // register anchor holding B phrases near the motif — the accepted
+            // B-phrase fix scored on it (dropping it cost reg_b 4.35 -> 5.10
+            // over 60 seeds, measured; DECISIONS.md). Pitch-only: the snap
+            // coin below is drawn unconditionally either way.
+            const bool strong = (tick % kTicksPerBeat) == 0 || i == 0;
             bool didSnap = false;
             if (ending) {
                 // Resolve to the ACTIVE harmony (4c), now genuinely active: the
