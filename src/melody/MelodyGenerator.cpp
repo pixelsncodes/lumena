@@ -1220,7 +1220,8 @@ struct EmitSlot {
     long startTick = 0;
     long durTicks = 0;
     int subs = 1;
-    bool figure = false;  // one of the three ornament pieces
+    bool figure = false;        // one of the three ornament pieces
+    bool anticipation = false;  // a tied anticipation (sustains past a boundary)
 };
 
 // Builds a structured, phrased melody: motif (A), varied repeat (A'),
@@ -1293,6 +1294,24 @@ Melody generatePhrased(const BrightnessGrid& grid, const Scale& scale,
                     dur = barAlignedDuration(
                         static_cast<double>(t) / kTicksPerBeat,
                         builder.rhythmTemplate());
+                    // Honest tied anticipation (Phase 4.5, DECISIONS.md): a
+                    // mid-slot start whose remainder to the next groove
+                    // boundary is shorter than an eighth — the smallest value
+                    // in the groove's own vocabulary — is no longer emitted as
+                    // a clipped sliver. It sustains through the boundary to
+                    // the end of the NEXT slot, one MIDI event: the note
+                    // sounds early and holds through the beat it anticipates.
+                    // Groove boundaries include every bar line, so these ties
+                    // cross bar lines — structurally impossible in the old
+                    // two-clock world (CLOCK_TRACE.md §3). Anticipations are
+                    // never density-split (a subdivided tie is not a tie).
+                    if (dur < 0.5) {
+                        const double nextSlot = barAlignedDuration(
+                            static_cast<double>(t) / kTicksPerBeat + dur,
+                            builder.rhythmTemplate());
+                        dur += nextSlot;
+                        s.anticipation = true;
+                    }
                 } else {
                     dur = ownLens[j];
                 }
@@ -1304,7 +1323,8 @@ Melody generatePhrased(const BrightnessGrid& grid, const Scale& scale,
                 s.durTicks = std::lround(dur * kTicksPerBeat);
                 // Image density: split only while exactly on the 960 grid and
                 // no finer than a 1/64 (unchanged Phase-3 rule).
-                if (!settle && !isSite && templated && densityAmt > 0.0) {
+                if (!settle && !isSite && templated && !s.anticipation &&
+                    densityAmt > 0.0) {
                     const int n =
                         densitySubdivisionsWanted(contrasts[j], densityAmt);
                     if (n > 1 && s.durTicks % n == 0 &&

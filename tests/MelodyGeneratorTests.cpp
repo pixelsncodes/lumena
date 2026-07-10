@@ -2036,11 +2036,91 @@ void test_pitch_domain_never_shifts_timing() {
     CHECK(anyPitchDiff);
 }
 
+// Phase 4.5 — honest tied anticipation, pinned in two halves.
+//
+// (1) The sliver floor: with ornaments and density off every emitted note is
+// templated (or a settle/cadence), so no duration may be shorter than an
+// eighth — a mid-slot fragment must have tied through its boundary instead of
+// emitting as a clipped sliver. Asserted across the energy range (every
+// groove).
+//
+// (2) The bar-line crossing exists: with ornaments ON (triplet figures create
+// the off-grid entries that fragments — and so anticipations — arise from),
+// somewhere across the sweep a NON-phrase-final, NON-figure note (duration
+// >= an eighth) sustains across a bar line. Structurally impossible in the
+// old two-clock world, which truncated every templated note at the boundary.
+void test_anticipation_ties_across_barlines() {
+    const Scale scale = minorPentatonic();
+
+    // (1) sliver floor, ornaments off.
+    {
+        const Image image = makeDiagonalGradient(160, 120);
+        const BrightnessGrid grid(image, 16, 12);
+        for (double energy : {0.0, 0.5, 1.0}) {
+            for (unsigned seed = 1; seed <= 20; ++seed) {
+                MelodyOptions o;
+                o.phraseMode = PhraseMode::Phrased;
+                o.rhythm = RhythmMode::Flowing;
+                o.length = 32;
+                o.loopBars = 8;
+                o.arpeggioAmount = 0.0;
+                o.imageRhythmAmount = 0.0;
+                o.energy = energy;
+                std::mt19937 rng(seed);
+                const Melody m = generateMelody(grid, scale, o, rng);
+                for (const Note& n : m.notes)
+                    CHECK(n.lengthBeats >= 0.5 - 1e-9);
+            }
+        }
+    }
+
+    // (2) a tied anticipation crossing a bar line exists somewhere in the
+    // sweep (deterministic: fixed seeds, fixed images).
+    bool anyCrossing = false;
+    const Image images[2] = {makeDiagonalGradient(160, 120),
+                             makeCheckerboard(160, 120, 10)};
+    for (const Image& image : images) {
+        const BrightnessGrid grid(image, 16, 12);
+        for (double arp : {0.15, 0.3}) {
+            for (unsigned seed = 1; seed <= 120 && !anyCrossing; ++seed) {
+                MelodyOptions o;
+                o.phraseMode = PhraseMode::Phrased;
+                o.rhythm = RhythmMode::Flowing;
+                o.length = 32;
+                o.loopBars = 8;
+                o.arpeggioAmount = arp;
+                o.imageRhythmAmount = 0.0;
+                std::mt19937 rng(seed);
+                const Melody m = generateMelody(grid, scale, o, rng);
+
+                std::set<std::size_t> phraseFinal;
+                for (std::size_t p = 0; p < m.phraseStarts.size(); ++p)
+                    phraseFinal.insert((p + 1 < m.phraseStarts.size()
+                                            ? m.phraseStarts[p + 1]
+                                            : m.notes.size()) - 1);
+                for (std::size_t i = 0; i < m.notes.size(); ++i) {
+                    if (phraseFinal.count(i)) continue;  // settles cross by design
+                    if (m.notes[i].lengthBeats < 0.5 - 1e-9) continue;  // figure
+                    const double start = m.notes[i].startBeats;
+                    const double end = start + m.notes[i].lengthBeats;
+                    if (std::floor(end / 4.0 - 1e-9) >
+                        std::floor(start / 4.0 + 1e-9))
+                        anyCrossing = true;
+                }
+            }
+            if (anyCrossing) break;
+        }
+        if (anyCrossing) break;
+    }
+    CHECK(anyCrossing);
+}
+
 }  // namespace
 
 void run_melody_generator_tests() {
     test_strong_beat_tick_grid();
     test_pitch_domain_never_shifts_timing();
+    test_anticipation_ties_across_barlines();
     test_random_walk_is_smooth();
     test_velocity_mapping_in_bytes();
     test_rhythm_modes();
