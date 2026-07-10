@@ -1,3 +1,52 @@
+# Phase 4.5 — Session 1/3: clock trace (read-only, docs only)
+
+Deliverable: `CLOCK_TRACE.md` at this tip (`feature/motif-phrasing`). No
+engine code, no builds beyond reading, no branches. Highlights:
+
+- **Two clocks fully mapped:** `localBeat_` (:1130, phrase-relative, sole
+  reset :370) and `harmonyBeat_` (:1139, generation-order) — sole advance
+  site for both is `stepNote:950-951`, so rests, ornament figures, settles
+  AND every copied/varied A-family phrase are invisible to them. Newly
+  pinned consequence: **A′/A″ phrases advance `harmonyBeat_` by zero**, so
+  the pass-1 harmony bar is fictional after phrase 1, and walked ENDINGS
+  (snap-ineligible, :939) cadence onto that fictional bar's chord — pass 2
+  never covers them. Also: stepNote's strong-beat velocity accent (:930) is
+  dead code — `applyPhraseDynamics` overwrites every velocity.
+- **The disease traced end to end** (§2): `maybeOrnament`'s draw consumption
+  depends on `src.degree` via the room band `[4, totalDegrees-5]` (dirPick
+  :605) and the :603 early return; crossing the band shifts every later
+  draw → the 12.3% rider. Cure shape: hoist dirPick+shape to unconditional
+  post-coin draws, apply room logic to the drawn values.
+- **Draw map complete** (§4). Data-conditional sites: stepNote:899 [CELL]
+  (known), maybeOrnament:603/:605 [PITCH], and one **previously
+  uncatalogued** [PITCH] site — `enforceVariety:1524-1550` (pitch-dominance
+  and spread draws; last-in-stream, so inert for single-generation callers,
+  but the disease class — stabilise or retire in 4.5).
+- **Anticipation** (§3): templated notes never cross bar lines (template
+  boundaries all land on beat 4/8); mid-slot phrase starts get clipped
+  fragments; true tied anticipation structurally impossible — the Phase-3.5
+  FLAG (SESSION_NOTES:668) is the mandate. Honest emission = duration-only
+  change, note count unchanged with single-event sustains.
+- **Blast radius** (§5): all 44 melody tests classified — invariants that
+  must survive (determinism, 960-grid, phrase structure, cadences, locks)
+  vs re-baseline candidates (chord-tone threshold :689, walk-cell
+  reconstruction :1349, strong-beat helper :1965 if 4.5-c lands).
+- **Design on paper** (§6): single integer-tick emission clock; fuse
+  walk+flatten (rest → hoisted ornament draws → walk with real tick);
+  delete pass 2, both clocks, the cursor, the :899 draw. Migration
+  4.5-a (ornament decouple, arp-0 byte-gate) → 4.5-b (unification, property
+  canary — the one commit with no byte gate) → 4.5-c (bar-relative strong)
+  → 4.5-d (honest ties, optional). New-world canary stated explicitly:
+  old cross-version byte canary is dead from 4.5-b; replaced by G2×2 +
+  scoped per-commit byte gates + property set + metric sweep (M2/M3/
+  tripwire vs ARM-1 numbers) + a counting-RNG draw-stability regression
+  test + one ear gate. Success criterion: rider = 0%.
+
+STOPPED after committing the two docs, per brief. Session 2 opens with
+4.5-a.
+
+---
+
 # ARM-1 ACCEPTED AND MERGED — verdict + merge record
 
 **Human ear verdict (on the `auditions/ablation/` 12-file grid, committed at
