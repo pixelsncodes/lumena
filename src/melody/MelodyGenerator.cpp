@@ -2340,28 +2340,54 @@ Melody generateChords(const BrightnessGrid& grid, const Scale& scale,
 
 // ---- loop post-processing ---------------------------------------------------
 
-// Snaps the material's total length up to a whole number of bars by extending
-// the note(s) that end last, so a looping player repeats it seamlessly. When
-// `loopBars` > 0 it targets at least that many bars; otherwise it rounds up to
-// the next whole bar. A no-op when the material already fills whole bars (as
-// the arpeggiator/chords loop paths arrange).
+// Snaps the material's total length to a whole number of bars so a looping
+// player repeats it seamlessly; `loopBars` > 0 is a floor. Phase 4.5 backlog
+// (post-merge): the render ends at the musical FORM's final bar — the last
+// bar that contains a note ONSET. A tail that merely dribbles past that bar
+// line no longer drags in a nearly-empty trailing bar: it is trimmed to the
+// line instead (durations only; onsets never move). Exception: when the form
+// bar line would leave the final note shorter than it deserves — under its
+// own length or the cadential hold (kCadenceBeats), whichever is smaller —
+// the target grows one bar and the tail is extended as before. That keeps
+// the suite-pinned >=2-beat cadence, leaves the exactly-filling arp/chords
+// paths untouched, and preserves 4.5-f's terminal bound.
 void padToWholeBars(Melody& melody, double beatsPerBar, int loopBars) {
     if (melody.notes.empty() || beatsPerBar <= 0.0) return;
 
-    double total = 0.0;
+    double total = 0.0, lastOnset = 0.0, finalLen = 0.0;
     for (const Note& n : melody.notes) {
         total = std::max(total, n.startBeats + n.lengthBeats);
+        if (n.startBeats > lastOnset + 1e-9) {
+            lastOnset = n.startBeats;
+            finalLen = n.lengthBeats;
+        } else if (n.startBeats > lastOnset - 1e-9) {
+            // Chords: several notes share the final onset; the longest rules.
+            finalLen = std::max(finalLen, n.lengthBeats);
+        }
     }
 
-    const double ceilBars = std::ceil(total / beatsPerBar - 1e-9);
-    const double bars = std::max({1.0, ceilBars, static_cast<double>(loopBars)});
+    // Bars that contain onsets (the musical form), floored by loopBars.
+    double bars =
+        std::max({1.0, std::floor(lastOnset / beatsPerBar + 1e-9) + 1.0,
+                  static_cast<double>(loopBars)});
+    if (bars * beatsPerBar - lastOnset <
+        std::min(finalLen, kCadenceBeats) - 1e-9)
+        bars += 1.0;  // the final note keeps its hold
     const double target = bars * beatsPerBar;
+
     if (target > total + 1e-9) {
         // Extend every note that currently ends at the max (chords end together)
         // so a final block chord stays intact.
         for (Note& n : melody.notes) {
             if (n.startBeats + n.lengthBeats > total - 1e-9) {
                 n.lengthBeats += (target - total);
+            }
+        }
+    } else if (total > target + 1e-9) {
+        // Trim the dribbling tails to the form's final bar line.
+        for (Note& n : melody.notes) {
+            if (n.startBeats + n.lengthBeats > target + 1e-9) {
+                n.lengthBeats = target - n.startBeats;
             }
         }
     }
