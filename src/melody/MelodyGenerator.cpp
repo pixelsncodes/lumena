@@ -106,6 +106,31 @@ constexpr float kContourSlopeThreshold = 0.03f;
 // purpose — an audition constant, not a user control.
 constexpr int kTeleportWindowBase = 2;
 constexpr int kTeleportWindowRefColumns = 16;
+// Phase 4.5-e (register continuity, stated rule): each bar's emitted register
+// stays within a band of the bar before it. The old two-clock engine glued the
+// whole piece's register together by accident (its double harmonization
+// re-snapped every fictionally-strong note toward home chord tones); the honest
+// clock removed that glue and adjacent bars started teleporting (measured: mean
+// adjacent-bar centroid jump grew ~2.4->4.5 st on affected seeds). The rule is
+// enforced pitch-only, draw-free, in three cooperating parts:
+//   1. a walked phrase's notes keep within +/- kPhraseCompassDegrees scale
+//      degrees of the phrase's entry note (post-draw clamp in walkDegreesAt),
+//      so one phrase cannot straddle two registers;
+//   2. at emission each phrase is octave-folded toward the previous emitted
+//      bar's pitch centroid when its own centroid strays past the band
+//      (whole-phrase fold: pitch classes, intervals, chord snaps and cadence
+//      function are all preserved);
+//   3. a final per-bar rescue pass folds any bar still out of band (folds are
+//      skipped when the scale range cannot absorb a whole octave).
+// B phrases are deliberate register contrast, so they breathe in a wider band.
+constexpr double kRegisterBandA = 6.0;  // st: A-family + closing phrases
+constexpr double kRegisterBandB = 9.0;  // st: B phrases (contrast breathes wider)
+constexpr int kPhraseCompassDegrees = 4;
+// Rescue folds (part 3) keep one degree of headroom at each scale edge so a
+// folded bar never parks on the extreme degree — the walk and cadence logic
+// still have somewhere to move. Whole-phrase folds (part 2) need no margin:
+// they only relocate a phrase the walk already shaped inside the range.
+constexpr int kFoldEdgeMargin = 1;
 
 }  // namespace
 
@@ -262,24 +287,27 @@ struct PhraseNote {
     bool dbgSnapped = false;  ///< did stepNote snap it to a chord tone?
     int dbgChordRoot = -1;    ///< progression root degree the snap targeted (-1 = none)
 
-    // ---- pass-2 re-harmonisation inputs (bug 4, 4a two-pass) ----------------
-    // Recorded in pass 1 so the pass-2 re-harmonisation can decide the snap
-    // against the note's REAL emitted beat without re-running the walk (and
-    // without drawing any rng). `eligible` marks walked, non-ending notes — the
-    // only ones the snap ever touches; copied/varied/cadence/ending notes are
-    // false and are left exactly as generated.
-    double snapCoin = 1.0;   ///< the unconditional snap coin drawn in pass 1 (>=0.6 => never snaps)
-    bool eligible = false;   ///< walked non-ending note (a snap site candidate)
-
     // ---- rhythm/density (Phase 3) -------------------------------------------
     // `templated` marks a walked note whose emitted duration is taken from the
     // session groove tiled to real bar lines (barAlignedDuration) rather than
     // from the note itself. Ornament figures and the cadence note carry their
-    // own hand-set durations and are left false. `subdivisions` (>= 1) is the
-    // image-density decision made pre-flatten: how many equal on-grid pieces
-    // this note's bar-aligned duration is split into (1 = no split).
+    // own hand-set durations and are left false.
     bool templated = false;
-    int subdivisions = 1;
+};
+
+// Phase 4.5-b: one planned step of a phrase's grid walk. The cell path is a
+// pure function of the start cell, the contour and the grid (plus the two
+// PureRandom draws per note when that option is set) — it involves NO pitch —
+// so a whole phrase's cells are planned first, the timing skeleton (ornament
+// site, durations, densities, real start ticks) is fixed from them, and only
+// then are pitches drawn. That ordering is what makes the pitch->draw cure
+// structural: by the time any pitch exists, every draw that shapes timing has
+// already been consumed.
+struct PlannedCell {
+    int col = 0;
+    int row = 0;
+    float brightness = 0.0f;  // the walk cell's own brightness
+    float material = 0.0f;    // pitch-material brightness (C-1 shadow for B)
 };
 
 // State the phrase builder threads through generation: the grid walk position,
@@ -357,17 +385,13 @@ public:
         }
     }
 
-    // Builds a phrase of `count` notes by walking the grid along an
-    // image-selected contour. When `newRegion` is set, the walk teleports to a
-    // random cell first (the contrasting-phrase B). When `tonicFifthEnding` is
-    // set, the last note is pulled hard toward the nearest tonic or fifth
-    // degree. The contour (Rise/Fall/Arch) is chosen from the brightness trend
-    // at the phrase's start cell and realised by steering the grid walk toward
-    // brighter/darker cells, so the existing brightness->degree blend turns the
-    // image's own brightness path into the melodic contour (Phase 3.5).
-    std::vector<PhraseNote> walkPhrase(int count, bool newRegion,
-                                       bool tonicFifthEnding) {
-        localBeat_ = 0.0;  // strong-beat tracking is per-phrase
+    // Phase 4.5-b: plans a phrase's whole cell path — the pitch-free half of
+    // the old walkPhrase. Teleport draws (B) and the C-1 related-window remap
+    // are unchanged; the contour is selected and the cells stepped exactly as
+    // before (deterministic contour walk; two draws per note under
+    // PureRandom). Pitches are drawn later, by walkDegreesAt, against the
+    // REAL start ticks the timing plan assigns these cells.
+    std::vector<PlannedCell> planPhraseCells(int count, bool newRegion) {
         shadowDCol_ = 0;   // pitch material follows the walk cell by default
         shadowDRow_ = 0;
         if (newRegion) {
@@ -411,20 +435,131 @@ public:
         contourLen_ = count > 0 ? count : 1;
         prevCol_ = -1;  // no cell to avoid backtracking into yet
         prevRow_ = -1;
-        std::vector<PhraseNote> phrase;
-        phrase.reserve(static_cast<std::size_t>(count));
+        std::vector<PlannedCell> cells;
+        cells.reserve(static_cast<std::size_t>(count));
         for (int i = 0; i < count; ++i) {
-            const bool ending = tonicFifthEnding && i == count - 1;
-            phrase.push_back(stepNote(ending));
+            cells.push_back(stepCell());
+        }
+        return cells;
+    }
+
+    // Phase 4.5-b: the pitch pass. Cells and START TICKS are already fixed by
+    // the timing plan, so `strong` and the harmony bar are read from the REAL
+    // emitted timeline — the old localBeat_/harmonyBeat_ generation-time
+    // clocks (and the pass-2 reconciliation they required) are gone. Per-note
+    // draw order is the old stepNote's minus the retired |gradient| > 0.02
+    // stream-identity draw: nextBiased, leap gate (+2 conditional draws), snap
+    // coin, anti-stuck coin. An ending draws one nextBiased and lands a chord
+    // tone of the REAL bar's chord — previously it targeted the fictional
+    // harmonyBeat_ bar, the one damage pass 2 never repaired (CLOCK_TRACE §1).
+    std::vector<PhraseNote> walkDegreesAt(const std::vector<PlannedCell>& cells,
+                                          const std::vector<long>& startTicks,
+                                          bool tonicFifthEnding) {
+        const double complexity = clampUnit(options_.arpeggioAmount);
+        std::vector<PhraseNote> phrase;
+        phrase.reserve(cells.size());
+        int entryDegree = -1;  // 4.5-e compass anchor: the phrase's first note
+        for (std::size_t i = 0; i < cells.size(); ++i) {
+            const bool ending = tonicFifthEnding && i + 1 == cells.size();
+            const long tick = startTicks[i];
+            updateHarmonyTarget(static_cast<double>(tick) / kTicksPerBeat);
+            // Accent points: integer beats — REAL ones, at last — plus the
+            // PHRASE ENTRY (4.5-d). The entry accent is a stated musical rule
+            // (a phrase's first note is an arrival, wherever the grid puts
+            // it) replacing what the old phrase-relative clock did by
+            // accident: localBeat_'s reset made every walked phrase's first
+            // note "strong", and that 60% chord-snap at the entry was the
+            // register anchor holding B phrases near the motif — the accepted
+            // B-phrase fix scored on it (dropping it cost reg_b 4.35 -> 5.10
+            // over 60 seeds, measured; DECISIONS.md). Pitch-only: the snap
+            // coin below is drawn unconditionally either way.
+            const bool strong = (tick % kTicksPerBeat) == 0 || i == 0;
+            bool didSnap = false;
+            if (ending) {
+                // Resolve to the ACTIVE harmony (4c), now genuinely active: the
+                // chord of the bar this note actually sounds in.
+                const int target =
+                    nearestChordToneDegree(static_cast<int>(degree_));
+                degree_ = chain_.nextBiased(degree_, static_cast<float>(target),
+                                            kPhraseEndBias);
+                degree_ = static_cast<std::size_t>(
+                    nearestChordToneDegree(static_cast<int>(degree_)));
+            } else {
+                // Theory-weighted Markov blended toward the degree the material
+                // cell's brightness suggests (C-1: B phrases read the shadow
+                // window; everyone else their own cell).
+                const int imageTarget = scales::mapBrightnessToDegree(
+                    cells[i].material, totalDegrees_);
+                int next = static_cast<int>(chain_.nextBiased(
+                    degree_, static_cast<float>(imageTarget), bias_));
+                // Complexity: occasional leap for interval variety.
+                if (uni01() < complexity * 0.4) {
+                    const int leap = (uni01() < 0.5 ? -1 : 1) *
+                                     (2 + static_cast<int>(uni01() * 2.0));
+                    next = clampDegree(next + leap);
+                }
+                // Register continuity (4.5-e, part 1): a phrase is one gesture
+                // in one register — clamp the drawn degree into the compass
+                // around the phrase's entry note. Post-draw remap of the
+                // already-sampled value (every draw above is consumed
+                // unconditionally), so the stream is untouched; the image
+                // target can still bend the line, it just can't teleport it
+                // an octave mid-phrase. Applied before the chord snap so the
+                // snapped tone also lands inside the compass.
+                if (entryDegree >= 0) {
+                    if (next < entryDegree - kPhraseCompassDegrees)
+                        next = clampDegree(entryDegree - kPhraseCompassDegrees);
+                    if (next > entryDegree + kPhraseCompassDegrees)
+                        next = clampDegree(entryDegree + kPhraseCompassDegrees);
+                }
+                // Strong beats prefer a chord tone; the coin stays
+                // unconditional (4a-0) so the stream is classification-free.
+                const double snapCoin = uni01();
+                if (strong && snapCoin < 0.6) {
+                    next = nearestChordToneDegree(next);
+                    didSnap = true;
+                }
+                // Anti-stuck: never sit on the same degree twice running.
+                const double antiStuckCoin = uni01();
+                if (next == static_cast<int>(degree_)) {
+                    next = clampDegree(next + (antiStuckCoin < 0.5 ? -1 : 1));
+                }
+                degree_ = static_cast<std::size_t>(next);
+            }
+            PhraseNote note;
+            note.degree = static_cast<int>(degree_);
+            if (entryDegree < 0) entryDegree = note.degree;
+            note.noteNumber = scale_.noteAt(note.degree, options_.octaveSpan);
+            note.brightness = cells[i].brightness;
+            note.col = cells[i].col;
+            note.row = cells[i].row;
+            // Real-beat diagnostics, written once (no pass-2 rewrite): endings
+            // record the root they were targeted at, mid notes only when the
+            // snap actually fired — the same final semantics the old pass 2
+            // left behind, now from the one true clock.
+            note.dbgStrong = strong;
+            note.dbgSnapped = didSnap;
+            note.dbgChordRoot = (ending || didSnap) ? curChordRoot_ : -1;
+            note.templated = true;
+            note.lengthBeats = 1.0;  // Straight-mode length; Flowing re-derives
+            phrase.push_back(note);
         }
         return phrase;
     }
 
-    // A closing phrase: `count` notes whose final note is forced onto the
-    // nearest tonic (any octave) and held for at least a half note.
-    std::vector<PhraseNote> closingPhrase(int count) {
-        std::vector<PhraseNote> phrase = walkPhrase(count - 1, /*newRegion=*/false,
-                                                    /*tonicFifthEnding=*/true);
+    // The closing cadence's held length: a half note, or occasionally a whole
+    // note, to breathe at the end. Drawn in the PLAN stage (timing draws
+    // precede pitch draws — DECISIONS.md, Phase 4.5-b draw order).
+    double drawCadenceLength() {
+        std::uniform_real_distribution<double> coin(0.0, 1.0);
+        return coin(rng_) < 0.5 ? kCadenceBeats : 2.0 * kCadenceBeats;
+    }
+
+    // Finishes the closing phrase (4c rules unchanged): retunes the walked
+    // approach note, then appends the held tonic with the pre-drawn cadence
+    // length. Pitch-only; draws nothing.
+    void finishClosingPhrase(std::vector<PhraseNote>& phrase,
+                             double cadenceLength) {
         // Land squarely on a tonic for the cadence, approached smoothly.
         const int tonic = nearestDegreeWithPitchClass(static_cast<int>(degree_),
                                                        /*wantFifth=*/false);
@@ -471,11 +606,8 @@ public:
         note.brightness = brightness;
         note.col = col_;
         note.row = row_;
-        // A half note, or occasionally a whole note, to breathe at the end.
-        std::uniform_real_distribution<double> coin(0.0, 1.0);
-        note.lengthBeats = coin(rng_) < 0.5 ? kCadenceBeats : 2.0 * kCadenceBeats;
+        note.lengthBeats = cadenceLength;  // pre-drawn in the plan stage
         phrase.push_back(note);
-        return phrase;
     }
 
     // Transposes a stored motif by +/-1..2 scale degrees (clamped so every note
@@ -568,24 +700,43 @@ public:
         return v;
     }
 
-    // Replaces one note of `phrase` with a three-note arpeggio (scale degrees
-    // 0-2-4 of the pentatonic: root/third-ish/fifth-ish) with probability
-    // `options.arpeggioAmount`. Bright cells (> 0.7) are preferred as the site;
-    // otherwise the brightest note in the phrase is used. In-scale by
-    // construction, since every figure note is a real scale degree.
-    void maybeOrnament(std::vector<PhraseNote>& phrase) {
-        const double amount = std::min(1.0, std::max(0.0, options_.arpeggioAmount));
-        if (amount <= 0.0 || phrase.empty()) return;
+    // Phase 4.5-b: the ornament decision, split into plan-time draws and a
+    // post-walk pitch splice. drawOrnamentPlan consumes the coin — and, when
+    // it fires, dirPick and shape (unconditionally: the 4.5-a cure) — BEFORE
+    // any pitch exists, so the timing plan can lay out the figure's three
+    // slots. ornamentSiteOf picks the site from cell brightness alone (the
+    // same bright-cell preference as always). spliceOrnamentFigure fills the
+    // figure's pitches after the walk, applying the old room logic to the
+    // pre-drawn direction.
+    struct OrnamentPlan {
+        bool fired = false;
+        int dirDraw = 0;
+        double each = 0.5;  // per-piece length: eighths, or a triplet's third
+    };
 
+    OrnamentPlan drawOrnamentPlan() {
+        OrnamentPlan plan;
+        const double amount =
+            std::min(1.0, std::max(0.0, options_.arpeggioAmount));
+        if (amount <= 0.0) return plan;
         std::uniform_real_distribution<double> coin(0.0, 1.0);
-        if (coin(rng_) >= amount) return;
+        if (coin(rng_) >= amount) return plan;
+        plan.fired = true;
+        std::uniform_int_distribution<int> dirPick(0, 1);
+        plan.dirDraw = dirPick(rng_);
+        // Three straight eighths, or an eighth-note triplet spanning one beat.
+        std::uniform_int_distribution<int> shape(0, 1);
+        plan.each = shape(rng_) == 0 ? 0.5 : (1.0 / 3.0);
+        return plan;
+    }
 
-        // Prefer a bright cell; fall back to the brightest note in the phrase.
+    // Prefer a bright cell; fall back to the brightest in the phrase.
+    static std::size_t ornamentSiteOf(const std::vector<float>& brightness) {
         std::size_t site = 0;
         bool haveBright = false;
         float best = -1.0f;
-        for (std::size_t i = 0; i < phrase.size(); ++i) {
-            const float b = phrase[i].brightness;
+        for (std::size_t i = 0; i < brightness.size(); ++i) {
+            const float b = brightness[i];
             if (b >= kArpeggioBrightness && !haveBright) {
                 site = i;
                 haveBright = true;
@@ -595,24 +746,55 @@ public:
                 site = i;
             }
         }
+        return site;
+    }
 
+    // Replaces the site note with a three-note arpeggio figure (scale degrees
+    // 0-2-4: root/third-ish/fifth-ish). In-scale by construction. Pitch-only;
+    // draws nothing (the plan already holds the drawn direction and shape).
+    void spliceOrnamentFigure(std::vector<PhraseNote>& phrase, std::size_t site,
+                              const OrnamentPlan& plan) {
         const PhraseNote src = phrase[site];
-        // Choose a direction that keeps 0-2-4 inside the usable range.
+        const int dirDraw = plan.dirDraw;
+        const double each = plan.each;
+        // Register continuity (4.5-e): the figure stays inside the phrase's
+        // register — the compass window around the walked notes, stretched by
+        // the figure's own 2-degree step. A figure that dives an octave out of
+        // its phrase was measured to teleport that bar's centroid.
+        int phraseLo = std::numeric_limits<int>::max();
+        int phraseHi = std::numeric_limits<int>::min();
+        for (const PhraseNote& n : phrase) {
+            phraseLo = std::min(phraseLo, n.degree);
+            phraseHi = std::max(phraseHi, n.degree);
+        }
+        const int windowLo = phraseLo - 2;
+        const int windowHi = phraseHi + 2;
+        // Direction: the drawn value decides when both sides have room for the
+        // 0-2-4 span; one-sided room overrides it (unchanged musical rule),
+        // and 4.5-e adds the stronger preference for a direction that also
+        // stays inside the phrase window. When NEITHER side has full room
+        // (only possible below 8 usable degrees — never at the shipped span-2
+        // scales) the figure is CLAMPED into range instead of skipped, so
+        // whether a figure exists — and thus the emitted note count — never
+        // depends on pitch (4.5-a; DECISIONS).
         const bool ascOk = src.degree + 4 < totalDegrees_;
         const bool descOk = src.degree - 4 >= 0;
-        if (!ascOk && !descOk) return;  // no room for a figure
-        std::uniform_int_distribution<int> dirPick(0, 1);
-        bool ascending = ascOk && (!descOk || dirPick(rng_) == 0);
+        const bool ascFits = ascOk && src.degree + 4 <= windowHi;
+        const bool descFits = descOk && src.degree - 4 >= windowLo;
+        bool ascending;
+        if (ascFits || descFits) {
+            ascending = ascFits && (!descFits || dirDraw == 0);
+        } else {
+            ascending = (ascOk || descOk) ? (ascOk && (!descOk || dirDraw == 0))
+                                          : (dirDraw == 0);
+        }
         const int step = ascending ? +2 : -2;
-
-        // Three straight eighths, or an eighth-note triplet spanning one beat.
-        std::uniform_int_distribution<int> shape(0, 1);
-        const double each = shape(rng_) == 0 ? 0.5 : (1.0 / 3.0);
 
         std::vector<PhraseNote> figure;
         figure.reserve(3);
         for (int k = 0; k < 3; ++k) {
-            const int deg = src.degree + step * k;
+            const int deg = clampDegree(
+                std::clamp(src.degree + step * k, windowLo, windowHi));
             PhraseNote n;
             n.degree = deg;
             n.noteNumber = scale_.noteAt(deg, options_.octaveSpan);
@@ -759,43 +941,14 @@ public:
         last.noteNumber = scale_.noteAt(best, options_.octaveSpan);
     }
 
-    // Pass 2 of the 4a two-pass. Pass 1 (the walk + flatten above) established
-    // every note's REAL emitted start beat, including rests and ornaments; here
-    // we re-decide the strong beat and chord-tone snap against THAT beat rather
-    // than the generation-time clock, for the walked snap-site candidates only
-    // (`eligible`). Draws no rng — it reuses the pass-1 snap coin — so it moves
-    // pitches only; timing and the RNG stream are untouched. The dbg* tracks are
-    // overwritten with the real-beat verdicts so the harness scores pass 2.
-    // `strong` stays every-integer-beat (4b redefines it to bar-relative later).
-    void reharmonizeAgainstRealBeats(Melody& melody,
-                                     const std::vector<double>& snapCoin,
-                                     const std::vector<char>& eligible) {
-        const std::size_t n = melody.notes.size();
-        for (std::size_t i = 0; i < n; ++i) {
-            if (i >= eligible.size() || !eligible[i]) continue;
-            const double realBeat = melody.notes[i].startBeats;
-            updateHarmonyTarget(realBeat);  // chordPcs_/curChordRoot_ for the real bar
-            const long tick = std::lround(realBeat * kTicksPerBeat);
-            const bool strong = (tick % kTicksPerBeat) == 0;
-            const bool snapped = strong && snapCoin[i] < 0.6;
-            if (snapped) {
-                const int nd = nearestChordToneDegree(melody.degrees[i]);
-                melody.degrees[i] = nd;
-                melody.notes[i].noteNumber = scale_.noteAt(nd, options_.octaveSpan);
-            }
-            melody.dbgStrong[i] = strong ? 1 : 0;
-            melody.dbgSnapped[i] = snapped ? 1 : 0;
-            melody.dbgChordRoot[i] = snapped ? curChordRoot_ : -1;
-        }
-    }
-
 private:
-    // Advances one step: moves on the grid, then chooses the next degree by
-    // stepwise Markov motion nudged by the image's brightness *gradient* (so the
-    // image shapes contour without collapsing the line to one pitch), snapping to
-    // a chord tone on strong beats. Duration comes from Energy/Complexity, not
-    // brightness, so "energetic" is actually denser and more varied.
-    PhraseNote stepNote(bool ending) {
+    // One deterministic contour-directed cell step (Phase 3.5 rule,
+    // unchanged): move to the neighbour that best follows the phrase's
+    // image-selected contour, excluding the cell we just came from. Pitch-free
+    // — Phase 4.5-b plans all of a phrase's cells before any pitch draw.
+    // PureRandom keeps its two draws per note. The old per-note
+    // |gradient| > 0.02 stream-identity draw is retired with the old stream.
+    PlannedCell stepCell() {
         const float prevBright = grid_.valueAt(col_, row_);
         if (options_.cellPath == CellPath::PureRandom) {
             std::uniform_int_distribution<int> colDist(0, grid_.columns() - 1);
@@ -833,123 +986,20 @@ private:
         }
         ++contourIdx_;
 
-        const float brightness = grid_.valueAt(col_, row_);
-        const float gradient = brightness - prevBright;
-        const double energy = clampUnit(options_.energy);
-        const double complexity = clampUnit(options_.arpeggioAmount);
-        // Strong-beat = every integer beat, on an exact tick grid (was a fragile
-        // float epsilon compare). Classification is unchanged. NOTE: `strong` is
-        // still phrase-relative via localBeat_ (resets each phrase) — making it
-        // bar-relative and reconciling the localBeat_/harmonyBeat_ clocks is
-        // deferred to bug 4.
-        const long tick = std::lround(localBeat_ * kTicksPerBeat);
-        const bool strong = (tick % kTicksPerBeat) == 0;
-
-        // Advance the harmony to the chord for the current bar, so strong-beat
-        // chord-tone targeting outlines the moving progression, not a fixed tonic.
-        updateHarmonyTarget(harmonyBeat_);
-
-        bool didSnap = false;   // diagnostics only (bug-4 hook)
-        double snapCoinVal = 1.0;  // pass-2 input: the snap coin for this note
-        if (ending) {
-            // A phrase ending resolves to the ACTIVE harmony, not a drifting key
-            // tone: bias the step toward a chord tone of the current bar's chord
-            // (the same single rng draw as before — stream identity preserved),
-            // then land it squarely on one (deterministic, no draw). So walked
-            // phrases cadence onto root/3rd/5th of the chord they end over instead
-            // of always the key tonic/fifth. Phase 4c.
-            const int target = nearestChordToneDegree(static_cast<int>(degree_));
-            degree_ = chain_.nextBiased(degree_, static_cast<float>(target),
-                                        kPhraseEndBias);
-            degree_ = static_cast<std::size_t>(
-                nearestChordToneDegree(static_cast<int>(degree_)));
-        } else {
-            // Base motion: theory-weighted Markov, blended toward the degree the
-            // cell's brightness suggests by the Image Influence amount (bias_).
-            // Ports Freeform's proven blend (mapBrightnessToDegree + nextBiased)
-            // into Phrased. nextBiased makes the same single rng draw as next(),
-            // and at bias_=0 is byte-identical to next(), so this is draw-neutral.
-            // Variant C (C-1): a B phrase reads its blend brightness from the
-            // shadow cell — the walk cell translated into the related window
-            // around motif A's anchor — so B's material comes from a region
-            // related to A's while the walk itself (and the draw stream) stays
-            // on the drawn path. Zero offset (non-B phrases) reads the walk cell
-            // exactly as before.
-            const float materialBright =
-                (shadowDCol_ != 0 || shadowDRow_ != 0)
-                    ? grid_.valueAt(
-                          std::clamp(col_ + shadowDCol_, 0, grid_.columns() - 1),
-                          std::clamp(row_ + shadowDRow_, 0, grid_.rows() - 1))
-                    : brightness;
-            const int imageTarget =
-                scales::mapBrightnessToDegree(materialBright, totalDegrees_);
-            int next = static_cast<int>(chain_.nextBiased(
-                degree_, static_cast<float>(imageTarget), bias_));
-
-            // Complexity: occasional leap for interval variety.
-            if (uni01() < complexity * 0.4) {
-                const int leap = (uni01() < 0.5 ? -1 : 1) *
-                                 (2 + static_cast<int>(uni01() * 2.0));  // ±2..3
-                next = clampDegree(next + leap);
-            }
-            // Old ±1 gradient nudge retired: the blend at the base-motion step
-            // now carries image influence. The draw is PRESERVED (same
-            // |gradient|>0.02f condition) purely for rng-stream identity, same
-            // pattern as the unconditional snap/anti-stuck coins below.
-            if (std::fabs(gradient) > 0.02f) { (void)uni01(); }
-            // Strong beats prefer a chord tone; weak beats may pass through.
-            // The snap coin is drawn UNCONDITIONALLY (not short-circuited behind
-            // `strong`) so the RNG stream no longer depends on the strong-beat
-            // classification. This decouples the draw sequence from the upcoming
-            // clock/strong changes (bug 4: 4a/4b), so their output movement is
-            // attributable to logic, not to RNG re-alignment. This commit (4a-0)
-            // is a one-time RNG-ordering churn only — no clock or classification
-            // change. See DECISIONS / bug-4 notes.
-            snapCoinVal = uni01();
-            if (strong && snapCoinVal < 0.6) {
-                next = nearestChordToneDegree(next);
-                didSnap = true;  // diagnostics only (bug-4 hook)
-            }
-            // Anti-stuck: never sit on the same degree twice running. The coin is
-            // drawn UNCONDITIONALLY (like the snap coin in 4a-0), so the RNG
-            // stream no longer depends on whether this branch fires. Required
-            // before 4a: the clock fix changes snapped degrees, which changes
-            // `next`, which would otherwise flip this short-circuit and perturb
-            // the draw sequence. 4a-0b: RNG-ordering churn only, no logic change.
-            const double antiStuckCoin = uni01();
-            if (next == static_cast<int>(degree_)) {
-                next = clampDegree(next + (antiStuckCoin < 0.5 ? -1 : 1));
-            }
-            degree_ = static_cast<std::size_t>(next);
-        }
-
-        PhraseNote note;
-        note.degree = static_cast<int>(degree_);
-        note.noteNumber = scale_.noteAt(note.degree, options_.octaveSpan);
-        int vel = brightnessToVelocity(brightness);
-        if (strong) vel = std::min(127, vel + static_cast<int>(10.0 * energy));  // accent
-        note.velocity = vel;
-        note.brightness = brightness;
-        note.col = col_;
-        note.row = row_;
-        note.dbgStrong = strong;           // diagnostics only (bug-4 hook)
-        note.dbgSnapped = didSnap;         // diagnostics only
-        note.dbgChordRoot = curChordRoot_; // diagnostics only
-        note.snapCoin = snapCoinVal;       // pass-2 input (bug 4, 4a)
-        note.eligible = !ending;           // walked non-ending -> a snap site candidate
-        note.templated = true;             // emitted duration comes from the bar-tiled groove
-        // Provisional duration for the pass-1 walk clock (localBeat_/harmonyBeat_
-        // and thus strong-beat/snap decisions). The nextDuration() cursor is kept
-        // ONLY as this back-compat walk clock so the pass-1 pitch trajectory is
-        // unchanged; the EMITTED duration is re-derived from the real bar line in
-        // the flatten loop (barAlignedDuration), which the cursor could not do
-        // (it never reset and ignored rests). See Phase 3 notes.
-        note.lengthBeats = (options_.rhythm == RhythmMode::Flowing)
-                               ? nextDuration()
-                               : 1.0;
-        localBeat_ += note.lengthBeats;
-        harmonyBeat_ += note.lengthBeats;  // accumulates across phrases
-        return note;
+        PlannedCell cell;
+        cell.col = col_;
+        cell.row = row_;
+        cell.brightness = grid_.valueAt(col_, row_);
+        // Variant C (C-1): a B phrase reads its pitch material from the shadow
+        // cell — the walk cell translated into the related window around motif
+        // A's anchor. Zero offset (non-B phrases) reads the walk cell itself.
+        cell.material =
+            (shadowDCol_ != 0 || shadowDRow_ != 0)
+                ? grid_.valueAt(
+                      std::clamp(col_ + shadowDCol_, 0, grid_.columns() - 1),
+                      std::clamp(row_ + shadowDRow_, 0, grid_.rows() - 1))
+                : cell.brightness;
+        return cell;
     }
 
     // A uniform [0,1) draw.
@@ -1015,18 +1065,6 @@ private:
         return clampDegree(from);
     }
 
-    // Next note length in beats. The session picks one rhythm template up front
-    // (see pickRhythmTemplate) and the melody cycles through it, so the piece has
-    // a consistent rhythmic identity instead of re-rolling every note. The
-    // template's note density is chosen to match Energy, keeping the old
-    // "energetic = busier" feel. Returns a steady quarter if no template is set.
-    double nextDuration() {
-        if (rhythmTemplate_.empty()) return 1.0;
-        const double d = rhythmTemplate_[rhythmCursor_ % rhythmTemplate_.size()];
-        ++rhythmCursor_;
-        return d;
-    }
-
     // Mean local contrast across the whole grid, in [0, 1]: a cheap "how much
     // detail / how many edges" scalar. Pure function of the image, draws no RNG.
     // Feeds rhythm-template selection so busy/edgy images pick busier grooves
@@ -1081,7 +1119,6 @@ private:
         }
         std::discrete_distribution<std::size_t> pick(weights.begin(), weights.end());
         rhythmTemplate_ = kTemplates[pick(rng_)].beats;
-        rhythmCursor_ = 0;
     }
 
     // The pitch class (semitones above the root, mod octave) of a scale degree.
@@ -1127,7 +1164,6 @@ private:
     int prevCol_ = -1;
     int prevRow_ = -1;
     std::size_t degree_;
-    double localBeat_ = 0.0;  // beats elapsed since the current phrase began
     int chordPcs_[3] = {0, 4, 7};  // current-chord pitch classes (strong-beat targets)
     int curChordRoot_ = 0;         // diagnostics only (bug-4 hook): last targeted root degree
     // Harmonic backbone shared with the arp/chords: a session-locked progression
@@ -1136,10 +1172,10 @@ private:
     int tonicPc_ = 0;
     bool progMajor_ = false;
     double beatsPerBar_ = 4.0;
-    double harmonyBeat_ = 0.0;  // beats elapsed across the whole melody
-    // Session-locked rhythm: one two-bar groove the melody cycles through.
+    // Session-locked rhythm: one two-bar groove, tiled to the real timeline by
+    // barAlignedDuration (Phase 4.5-b: the old note-count cursor that fed the
+    // provisional pass-1 clock is gone with the clocks themselves).
     std::vector<double> rhythmTemplate_;
-    std::size_t rhythmCursor_ = 0;
     // Mean grid local contrast (image detail), in [0,1]; steers template choice.
     double imageDetail_ = 0.0;
     // Variant B (register-rein): whether the previous varyMotif call actually
@@ -1207,27 +1243,17 @@ float localContrast(const BrightnessGrid& grid, int col, int row) {
     return hi > lo ? hi - lo : 0.0f;
 }
 
-// Pre-flatten image-density decision (Phase 3): sets each templated note's
-// `subdivisions` from its cell's local contrast, scaled by `amount`. 0..1 image
-// drive maps to 1..4 pieces; 2/3/4 all divide every groove length cleanly on the
-// 960 grid, so the flatten split stays on-grid. Deterministic — a pure function
-// of the image and `amount`, drawing no RNG — and a full no-op at amount == 0,
-// so the groove-only (Phase-3 Stage-1) output and the RNG stream are unchanged.
-// Ornament figures and the cadence note are left at 1 (their shape is fixed).
-void applyImageDensity(std::vector<std::vector<PhraseNote>>& phrases,
-                       const BrightnessGrid& grid, double amount) {
-    if (amount <= 0.0) return;
-    for (std::vector<PhraseNote>& phrase : phrases) {
-        for (PhraseNote& pn : phrase) {
-            if (!pn.templated) continue;
-            const double c =
-                static_cast<double>(localContrast(grid, pn.col, pn.row));
-            int extra = static_cast<int>(std::lround(c * amount * 3.0));
-            if (extra < 0) extra = 0;
-            if (extra > 3) extra = 3;
-            pn.subdivisions = 1 + extra;
-        }
-    }
+// Image-density decision (Phase 3, relocated into the Phase 4.5-b timing
+// plan): how many equal on-grid pieces a templated note's duration wants to
+// split into, from its cell's local contrast scaled by `amount`. 0..1 maps to
+// 1..4 pieces. Deterministic, draw-free, pitch-free.
+int densitySubdivisionsWanted(float contrast, double amount) {
+    if (amount <= 0.0) return 1;
+    int extra =
+        static_cast<int>(std::lround(static_cast<double>(contrast) * amount * 3.0));
+    if (extra < 0) extra = 0;
+    if (extra > 3) extra = 3;
+    return 1 + extra;
 }
 
 // The scale degree for piece `s` of a note split into `subs` pieces by image
@@ -1258,10 +1284,32 @@ int densityFillDegree(int start, int end, int s, int subs, int totalDegrees) {
     return clampDeg((s % 2 == 1) ? nb : start);
 }
 
+// One emitted slot of a phrase's timing plan (Phase 4.5-b): where the note
+// piece starts on the ONE real timeline, how long it sounds, and how many
+// equal density pieces it splits into. Slot k of the plan corresponds 1:1 to
+// entry k of the phrase's post-ornament note list.
+struct EmitSlot {
+    long startTick = 0;
+    long durTicks = 0;
+    int subs = 1;
+    bool figure = false;        // one of the three ornament pieces
+    bool anticipation = false;  // a tied anticipation (sustains past a boundary)
+};
+
 // Builds a structured, phrased melody: motif (A), varied repeat (A'),
 // contrasting phrase (B), extended as needed (A'' B ...), then a tonic-landing
 // closing phrase. Rests fall between phrases at kRestProbability, and each
 // phrase may sprout an arpeggio ornament.
+//
+// Phase 4.5-b: ONE clock. Each phrase runs plan-then-walk: (1) the rest
+// decision, (2) the slot's structural draws (repeat/vary or the B teleport),
+// (3) the ornament plan's draws, (4) a fully deterministic TIMING PLAN that
+// fixes every emitted slot's real start tick from the cells alone, (5) the
+// pitch walk against those real ticks (strong beats and the harmony bar are
+// finally the emitted ones — no pass-2 reconciliation, no fictional
+// localBeat_/harmonyBeat_), (6) dynamics, (7) emission. Every draw that
+// shapes timing is consumed before any pitch exists (DECISIONS.md), so the
+// pitch->draw cure is structural.
 Melody generatePhrased(const BrightnessGrid& grid, const Scale& scale,
                        const MelodyOptions& options, MelodyChain& chain,
                        int totalDegrees, std::mt19937& rng) {
@@ -1276,174 +1324,523 @@ Melody generatePhrased(const BrightnessGrid& grid, const Scale& scale,
     const int target =
         options.length > 0 ? options.length : static_cast<int>(grid.cellCount());
 
-    // Phrase 0 is the motif A (a smooth walk with a tonic/fifth-leaning end).
-    std::vector<std::vector<PhraseNote>> phrases;
-    const std::vector<PhraseNote> motif =
-        builder.walkPhrase(motifLen, /*newRegion=*/false,
-                           /*tonicFifthEnding=*/true);
-    phrases.push_back(motif);
-    // Variant C (C-1): anchor the B-phrase teleport window on motif A's first
-    // cell, so every B draws its material from a region related to A's.
-    if (!motif.empty()) builder.setMotifAnchor(motif.front().col, motif.front().row);
+    const bool flowing = options.rhythm == RhythmMode::Flowing;
+    const double densityAmt = clampUnit(options.imageRhythmAmount);
 
-    // Body: alternate variations of the motif (odd positions -> A', A'', ...)
-    // with fresh contrasting phrases (even positions -> B). Always emit at least
-    // A, A' and B before closing; then keep going until we reach the target,
-    // leaving room for the closing phrase.
-    int bodyNotes = static_cast<int>(motif.size());
-    int position = 1;
-    std::uniform_real_distribution<double> repeatCoin(0.0, 1.0);
-    while (static_cast<int>(phrases.size()) < 3 ||
-           bodyNotes < target - motifLen) {
-        std::vector<PhraseNote> phrase;
-        if (position % 2 == 1) {
-            // Variation slot: with probability `repetition` repeat the motif
-            // verbatim, otherwise emit a transposed A' variation. High
-            // Repetition -> the hook recurs; low Repetition -> it keeps evolving.
-            phrase = repeatCoin(rng) < options.repetition
-                         ? motif
-                         : builder.varyMotif(motif);  // A', A'', ...
-            // Diagnostics only (bug-4 hook): these notes are copied/transposed,
-            // not snapped in their new bar, so clear the inherited snap flags.
-            // Purely a debug-field reset — pitches/timing/RNG untouched. Indexed
-            // (not range-for) to avoid a GCC-15 -Wfree-nonheap-object false
-            // positive from inlining varyMotif's returned vector.
-            for (std::size_t k = 0; k < phrase.size(); ++k) {
-                phrase[k].dbgStrong = false;
-                phrase[k].dbgSnapped = false;
-                phrase[k].dbgChordRoot = -1;
-                phrase[k].eligible = false;  // copied notes are never re-harmonised
-                phrase[k].snapCoin = 1.0;
+    long tick = 0;  // THE clock: real emitted ticks (960/beat) from 0
+
+    // Register continuity (4.5-e): running per-bar pitch ledger of everything
+    // emitted so far, so each phrase can be folded toward the register the
+    // piece just left. Updated in emitPhrase; read by the fold below.
+    const long ticksPerBar = std::lround(
+        static_cast<double>(kTicksPerBeat) *
+        (options.beatsPerBar > 0.0 ? options.beatsPerBar : 4.0));
+    const int degreesPerOctave = static_cast<int>(scale.degreesPerOctave());
+    std::vector<double> barPitchSum;
+    std::vector<long> barPitchCount;
+    // Set when a register fold relocates the closing cadence; the approach
+    // note is then retuned against the folded geometry after part 3.
+    bool cadenceFolded = false;
+
+    // Deterministic timing plan for one phrase. `templatedFlags`/`ownLens`
+    // describe the pre-ornament notes (walked notes are all templated with a
+    // 1.0-beat Straight length; copied phrases bring their own fields);
+    // `contrasts` carries each note's cell contrast for the density split.
+    // Returns the emitted slots plus each pre-ornament note's start tick (the
+    // tick the pitch walk sees; an ornamented note's is its figure's first).
+    struct PhrasePlan {
+        std::vector<EmitSlot> slots;
+        std::vector<long> noteTicks;
+    };
+    auto planTiming = [&](std::size_t count, const PhraseBuilder::OrnamentPlan& orn,
+                          std::size_t site, bool closing, double cadenceLen,
+                          const std::vector<char>& templatedFlags,
+                          const std::vector<double>& ownLens,
+                          const std::vector<float>& contrasts) -> PhrasePlan {
+        PhrasePlan plan;
+        plan.noteTicks.assign(count, 0);
+        long t = tick;
+        for (std::size_t j = 0; j < count; ++j) {
+            const bool isSite = orn.fired && j == site;
+            const int pieces = isSite ? 3 : 1;
+            plan.noteTicks[j] = t;
+            for (int k = 0; k < pieces; ++k) {
+                EmitSlot s;
+                s.startTick = t;
+                s.figure = isSite;
+                const bool lastSlot = (j + 1 == count) && (k + 1 == pieces);
+                const bool templated = templatedFlags[j] != 0 && flowing;
+                double dur;
+                if (isSite) {
+                    dur = orn.each;
+                } else if (closing && j + 1 == count) {
+                    dur = cadenceLen;  // the held tonic (pre-drawn length)
+                } else if (templated) {
+                    dur = barAlignedDuration(
+                        static_cast<double>(t) / kTicksPerBeat,
+                        builder.rhythmTemplate());
+                    // Honest tied anticipation (Phase 4.5, DECISIONS.md): a
+                    // mid-slot start whose remainder to the next groove
+                    // boundary is shorter than an eighth — the smallest value
+                    // in the groove's own vocabulary — is no longer emitted as
+                    // a clipped sliver. It sustains through the boundary to
+                    // the end of the NEXT slot, one MIDI event: the note
+                    // sounds early and holds through the beat it anticipates.
+                    // Groove boundaries include every bar line, so these ties
+                    // cross bar lines — structurally impossible in the old
+                    // two-clock world (CLOCK_TRACE.md §3). Anticipations are
+                    // never density-split (a subdivided tie is not a tie).
+                    if (dur < 0.5) {
+                        const double nextSlot = barAlignedDuration(
+                            static_cast<double>(t) / kTicksPerBeat + dur,
+                            builder.rhythmTemplate());
+                        dur += nextSlot;
+                        s.anticipation = true;
+                    }
+                } else {
+                    dur = ownLens[j];
+                }
+                // Cadential settle (Phase 4c): the last emitted piece of a
+                // non-closing phrase only ever EXTENDS, stays on the 0.5 grid,
+                // and is never density-split.
+                const bool settle = lastSlot && !closing;
+                if (settle) dur = std::max(dur, kPhraseEndCadenceBeats);
+                s.durTicks = std::lround(dur * kTicksPerBeat);
+                // Image density: split only while exactly on the 960 grid and
+                // no finer than a 1/64 (unchanged Phase-3 rule).
+                if (!settle && !isSite && templated && !s.anticipation &&
+                    densityAmt > 0.0) {
+                    const int n =
+                        densitySubdivisionsWanted(contrasts[j], densityAmt);
+                    if (n > 1 && s.durTicks % n == 0 &&
+                        s.durTicks / n >= kMinSubdivisionTicks) {
+                        s.subs = n;
+                    }
+                }
+                plan.slots.push_back(s);
+                t += s.durTicks;
             }
-        } else {
-            phrase = builder.walkPhrase(motifLen, /*newRegion=*/true,
-                                        /*tonicFifthEnding=*/true);  // B
-            // Variant C (C-3): B ends open (degree 2/5, half-cadence function)
-            // so the A return reads as the answer, not an arbitrary restart.
-            builder.openBPhraseCadence(phrase);
         }
-        bodyNotes += static_cast<int>(phrase.size());
-        phrases.push_back(std::move(phrase));
-        ++position;
-        if (position > 4096) break;  // runaway guard
-    }
+        return plan;
+    };
 
-    // Closing phrase: cadence onto the tonic.
-    phrases.push_back(builder.closingPhrase(motifLen));
-
-    // Image-driven density (Phase 3): decide, per templated note, how many
-    // on-grid pieces its groove length is split into, from its cell's local
-    // image contrast. Pre-flatten and RNG-free, so a flat image or amount == 0
-    // leaves every note whole and reproduces the groove-only output exactly.
-    applyImageDensity(phrases, grid, clampUnit(options.imageRhythmAmount));
-
-    // Ornament each phrase (probabilistically), then flatten into timed notes,
-    // inserting rests at phrase boundaries.
-    double beat = 0.0;
-    // Pass-2 inputs, parallel with melody.notes: the recorded snap coin and
-    // whether the note is a walked snap-site candidate (bug 4, 4a two-pass).
-    std::vector<double> snapCoins;
-    std::vector<char> eligible;
-    for (std::size_t p = 0; p < phrases.size(); ++p) {
-        const bool finalPhrase = p + 1 == phrases.size();
-        // Ornament every phrase but the closing one — the cadence's final tonic
-        // must survive intact.
-        if (!finalPhrase) {
-            builder.maybeOrnament(phrases[p]);
-        }
-
-        // Shape the phrase's dynamics (after any ornament, so the added figure
-        // notes are shaped too); the last phrase decrescendos.
-        builder.applyPhraseDynamics(phrases[p], finalPhrase);
-
-        if (p > 0 && builder.rollRest()) {
-            // Higher Energy tightens the gaps between phrases (0 -> ~1.3x rests,
-            // 1 -> ~0.7x), for a more driving feel. Snap the gap to the half-beat
-            // grid so the next phrase starts on a groove boundary and the tiled
-            // template stays aligned (all positions land on the 960 tick grid).
-            const double rest =
-                builder.restLength() * (1.3 - 0.6 * clampUnit(options.energy));
-            beat += std::round(rest * 2.0) / 2.0;
-        }
-
+    // Emits one planned phrase: velocities through Energy, density fill
+    // degrees per piece, diagnostics on primary pieces only.
+    auto emitPhrase = [&](const std::vector<EmitSlot>& slots,
+                          const std::vector<PhraseNote>& phrase) {
         melody.phraseStarts.push_back(melody.notes.size());
-        const std::vector<PhraseNote>& phrase = phrases[p];
-        for (std::size_t j = 0; j < phrase.size(); ++j) {
-            const PhraseNote& pn = phrase[j];
-            // Templated notes take their emitted length from the groove tiled to
-            // the real bar line (so it restarts each downbeat and re-aligns after
-            // rests/ornaments); ornament figures and the cadence keep their own
-            // hand-set durations. Straight mode keeps its flat quarter notes.
-            const bool templated =
-                pn.templated && options.rhythm == RhythmMode::Flowing;
-            double emitLen =
-                templated ? barAlignedDuration(beat, builder.rhythmTemplate())
-                          : pn.lengthBeats;
-
-            // Cadential settle (Phase 4c): the LAST note of a non-closing phrase
-            // lands longer so the phrase breathes instead of cutting off abruptly.
-            // Fed pre-emission via the length only (no new counter / clock) — the
-            // flatten accumulator absorbs it and the next phrase re-aligns to the
-            // bar as usual. Only EXTENDS (never shortens), stays on the 0.5 grid,
-            // and leaves the note whole (no density subdivision on the ending). The
-            // closing phrase sets its own, longer cadence length in closingPhrase.
-            const bool phraseFinalNote = (j + 1 == phrase.size());
-            const bool settleEnding = phraseFinalNote && !finalPhrase;
-            if (settleEnding)
-                emitLen = std::max(emitLen, kPhraseEndCadenceBeats);
-
-            // Image density splits the groove length into `subs` equal pieces,
-            // but only while it stays exactly on the 960 grid (integer ticks) and
-            // no finer than 1/64 — otherwise the note stays whole. subs == 1
-            // (amount 0 / flat image / non-templated) is the plain single note.
-            int subs = 1;
-            if (!settleEnding && templated && pn.subdivisions > 1) {
-                const long durTicks = std::lround(emitLen * kTicksPerBeat);
-                const int n = pn.subdivisions;
-                if (durTicks % n == 0 && durTicks / n >= kMinSubdivisionTicks)
-                    subs = n;
-            }
-            const double subLen = emitLen / static_cast<double>(subs);
-            // Target degree the split walks toward: the next phrase note's degree
-            // (a stepwise passing run); at the phrase end there is none, so the
-            // fill folds back on the note itself (a neighbour turn). Piece 0 is
-            // always the note's own image-placed degree.
-            const int nextDeg = (j + 1 < phrase.size())
-                                     ? phrase[j + 1].degree
-                                     : pn.degree;
-
-            for (int s = 0; s < subs; ++s) {
-                const bool primary = (s == 0);
-                const int deg = densityFillDegree(pn.degree, nextDeg, s, subs,
+        for (std::size_t e = 0; e < slots.size(); ++e) {
+            const EmitSlot& s = slots[e];
+            const PhraseNote& pn = phrase[e];
+            const int nextDeg =
+                (e + 1 < phrase.size()) ? phrase[e + 1].degree : pn.degree;
+            const long pieceTicks = s.durTicks / s.subs;
+            for (int k = 0; k < s.subs; ++k) {
+                const bool primary = (k == 0);
+                const int deg = densityFillDegree(pn.degree, nextDeg, k, s.subs,
                                                   totalDegrees);
                 Note note;
                 note.noteNumber = scale.noteAt(deg, options.octaveSpan);
                 note.velocity = applyEnergy(pn.velocity, options.energy);
-                note.startBeats = beat;
-                note.lengthBeats = subLen;
+                note.startBeats =
+                    static_cast<double>(s.startTick + k * pieceTicks) /
+                    kTicksPerBeat;
+                note.lengthBeats =
+                    static_cast<double>(pieceTicks) / kTicksPerBeat;
                 melody.notes.push_back(note);
                 melody.degrees.push_back(deg);
                 melody.cells.push_back(GridCell{pn.col, pn.row});
-                // The primary piece (s == 0) carries the note's image-placed
-                // degree, its snap eligibility and diagnostics; the added
-                // passing/neighbour pieces are melodic fill — non-eligible
-                // (snapCoin 1.0 => pass 2 skips them) and cleared in the dbg
-                // tracks. At subs == 1 this is exactly the old single emission.
                 melody.dbgStrong.push_back(primary && pn.dbgStrong ? 1 : 0);
                 melody.dbgSnapped.push_back(primary && pn.dbgSnapped ? 1 : 0);
                 melody.dbgChordRoot.push_back(primary ? pn.dbgChordRoot : -1);
-                snapCoins.push_back(primary ? pn.snapCoin : 1.0);
-                eligible.push_back(primary && pn.eligible ? 1 : 0);
-                beat += subLen;
+                // 4.5-e ledger: every emitted piece votes in its real bar.
+                const long bar =
+                    ticksPerBar > 0 ? (s.startTick + k * pieceTicks) / ticksPerBar
+                                    : 0;
+                if (static_cast<std::size_t>(bar) >= barPitchCount.size()) {
+                    barPitchCount.resize(static_cast<std::size_t>(bar) + 1, 0);
+                    barPitchSum.resize(static_cast<std::size_t>(bar) + 1, 0.0);
+                }
+                barPitchSum[static_cast<std::size_t>(bar)] += note.noteNumber;
+                ++barPitchCount[static_cast<std::size_t>(bar)];
             }
+        }
+        if (!slots.empty())
+            tick = slots.back().startTick + slots.back().durTicks;
+    };
+
+    // Register continuity (4.5-e, part 2): fold a whole phrase by octaves
+    // toward the register the piece just left. Reference = pitch centroid of
+    // the last non-empty emitted bar at or before the phrase's first sounding
+    // bar; when the phrase's own centroid strays past the band, the whole
+    // phrase shifts by the nearest whole octaves that fit the scale range.
+    // Octave shifts preserve pitch classes and interval content, so chord
+    // snaps, the B phrase's open cadence and the closing tonic all keep their
+    // function. Pitch-only and draw-free; the timing plan never moves.
+    // Returns true when it folded (the caller tracks whether the closing
+    // cadence moved, so the approach note can be retuned after part 3).
+    auto applyRegisterContinuity = [&](const std::vector<EmitSlot>& slots,
+                                       std::vector<PhraseNote>& phrase,
+                                       bool isB) -> bool {
+        if (phrase.empty() || slots.empty() || ticksPerBar <= 0) return false;
+        const long firstBar = slots.front().startTick / ticksPerBar;
+        int refBar = -1;
+        for (std::size_t b = 0;
+             b < barPitchCount.size() && static_cast<long>(b) <= firstBar; ++b)
+            if (barPitchCount[b] > 0) refBar = static_cast<int>(b);
+        if (refBar < 0)
+            return false;  // phrase 0: nothing emitted yet, no reference
+        const double ref = barPitchSum[static_cast<std::size_t>(refBar)] /
+                           static_cast<double>(
+                               barPitchCount[static_cast<std::size_t>(refBar)]);
+        double cur = 0.0;
+        for (const PhraseNote& n : phrase) cur += n.noteNumber;
+        cur /= static_cast<double>(phrase.size());
+        const double band = isB ? kRegisterBandB : kRegisterBandA;
+        const double diff = cur - ref;
+        if (std::fabs(diff) <= band) return false;
+        long k = std::lround(diff / 12.0);
+        while (k != 0) {
+            bool fits = true;
+            for (const PhraseNote& n : phrase) {
+                const int d = n.degree - static_cast<int>(k) * degreesPerOctave;
+                if (d < 0 || d >= totalDegrees) { fits = false; break; }
+            }
+            if (fits) {
+                for (PhraseNote& n : phrase) {
+                    n.degree -= static_cast<int>(k) * degreesPerOctave;
+                    n.noteNumber = scale.noteAt(n.degree, options.octaveSpan);
+                }
+                return true;
+            }
+            k += (k > 0) ? -1 : 1;  // a smaller fold may still fit the range
+        }
+        return false;
+    };
+
+    // Inter-phrase rest, decided FIRST in each phrase's block so the phrase's
+    // start tick is known before any of its other draws. Higher Energy
+    // tightens the gaps (0 -> ~1.3x, 1 -> ~0.7x); snapped to the half-beat
+    // grid so the tiled template stays aligned.
+    auto maybeRest = [&]() {
+        if (!builder.rollRest()) return;
+        const double rest =
+            builder.restLength() * (1.3 - 0.6 * clampUnit(options.energy));
+        const double snapped = std::round(rest * 2.0) / 2.0;
+        tick += std::lround(snapped * kTicksPerBeat);
+    };
+
+    std::vector<PhraseNote> motif;  // phrase 0's un-ornamented notes, for vary
+    std::uniform_real_distribution<double> repeatCoin(0.0, 1.0);
+
+    // Processes one WALKED phrase (motif, B, or the closing walk+cadence).
+    auto processWalked = [&](bool newRegion, bool isB, bool closing,
+                             bool isMotif) {
+        const int count = motifLen;
+        const int walkCount = closing ? count - 1 : count;
+        const std::vector<PlannedCell> cells =
+            builder.planPhraseCells(walkCount, newRegion);
+        const double cadenceLen = closing ? builder.drawCadenceLength() : 0.0;
+        PhraseBuilder::OrnamentPlan orn;
+        std::size_t site = 0;
+        if (!closing) {
+            orn = builder.drawOrnamentPlan();
+            if (orn.fired) {
+                std::vector<float> bright;
+                bright.reserve(cells.size());
+                for (const PlannedCell& c : cells) bright.push_back(c.brightness);
+                site = PhraseBuilder::ornamentSiteOf(bright);
+            }
+        }
+        // Plan inputs: walked notes are all templated, 1.0-beat Straight
+        // length; the closing cadence note is not templated. The cadence
+        // note's cell is wherever the walk ends (unused by the plan).
+        std::vector<char> templatedFlags(count, 1);
+        std::vector<double> ownLens(count, 1.0);
+        std::vector<float> contrasts(count, 0.0f);
+        for (std::size_t j = 0; j < cells.size(); ++j)
+            contrasts[j] = localContrast(grid, cells[j].col, cells[j].row);
+        if (closing) {
+            templatedFlags[count - 1] = 0;
+            ownLens[count - 1] = cadenceLen;
+        }
+        PhrasePlan plan = planTiming(static_cast<std::size_t>(count), orn, site,
+                                     closing, cadenceLen, templatedFlags,
+                                     ownLens, contrasts);
+        std::vector<long> walkTicks(plan.noteTicks.begin(),
+                                    plan.noteTicks.begin() + walkCount);
+        std::vector<PhraseNote> phrase =
+            builder.walkDegreesAt(cells, walkTicks, /*tonicFifthEnding=*/true);
+        if (isMotif) {
+            motif = phrase;  // pre-ornament, pre-dynamics copy for varyMotif
+            if (!motif.empty())
+                builder.setMotifAnchor(motif.front().col, motif.front().row);
+        }
+        if (isB) builder.openBPhraseCadence(phrase);
+        if (closing) builder.finishClosingPhrase(phrase, cadenceLen);
+        if (orn.fired) builder.spliceOrnamentFigure(phrase, site, orn);
+        if (applyRegisterContinuity(plan.slots, phrase, isB) && closing)
+            cadenceFolded = true;
+        builder.applyPhraseDynamics(phrase, /*finalPhrase=*/closing);
+        emitPhrase(plan.slots, phrase);
+    };
+
+    // Processes one COPIED phrase (A-family slot: verbatim repeat or vary).
+    auto processCopied = [&]() {
+        std::vector<PhraseNote> phrase = repeatCoin(rng) < options.repetition
+                                             ? motif
+                                             : builder.varyMotif(motif);
+        // Copied/transposed notes are never snapped in their new bar; clear
+        // the inherited diagnostics. Indexed loop: GCC-15 false positive.
+        for (std::size_t k = 0; k < phrase.size(); ++k) {
+            phrase[k].dbgStrong = false;
+            phrase[k].dbgSnapped = false;
+            phrase[k].dbgChordRoot = -1;
+        }
+        PhraseBuilder::OrnamentPlan orn = builder.drawOrnamentPlan();
+        std::size_t site = 0;
+        if (orn.fired) {
+            std::vector<float> bright;
+            bright.reserve(phrase.size());
+            for (const PhraseNote& pn : phrase) bright.push_back(pn.brightness);
+            site = PhraseBuilder::ornamentSiteOf(bright);
+        }
+        const std::size_t count = phrase.size();
+        std::vector<char> templatedFlags(count, 0);
+        std::vector<double> ownLens(count, 1.0);
+        std::vector<float> contrasts(count, 0.0f);
+        for (std::size_t j = 0; j < count; ++j) {
+            templatedFlags[j] = phrase[j].templated ? 1 : 0;
+            ownLens[j] = phrase[j].lengthBeats;
+            contrasts[j] = localContrast(grid, phrase[j].col, phrase[j].row);
+        }
+        PhrasePlan plan = planTiming(count, orn, site, /*closing=*/false, 0.0,
+                                     templatedFlags, ownLens, contrasts);
+        if (orn.fired) builder.spliceOrnamentFigure(phrase, site, orn);
+        applyRegisterContinuity(plan.slots, phrase, /*isB=*/false);
+        builder.applyPhraseDynamics(phrase, /*finalPhrase=*/false);
+        emitPhrase(plan.slots, phrase);
+    };
+
+    // Phrase 0: motif A.
+    processWalked(/*newRegion=*/false, /*isB=*/false, /*closing=*/false,
+                  /*isMotif=*/true);
+
+    // Body: alternate A-family slots (odd positions) with fresh contrasting
+    // B phrases (even positions). Always at least A, A' and B before closing;
+    // then keep going until the note-count target, leaving room for the
+    // closing phrase. Every phrase is motifLen notes pre-ornament, exactly as
+    // before, so the phrase schedule is unchanged.
+    int bodyNotes = motifLen;
+    int position = 1;
+    int phraseTotal = 1;
+    while (phraseTotal < 3 || bodyNotes < target - motifLen) {
+        maybeRest();
+        if (position % 2 == 1) {
+            processCopied();  // A', A'', ...
+        } else {
+            processWalked(/*newRegion=*/true, /*isB=*/true, /*closing=*/false,
+                          /*isMotif=*/false);  // B (C-1 window, C-3 open end)
+        }
+        bodyNotes += motifLen;
+        ++position;
+        ++phraseTotal;
+        if (position > 4096) break;  // runaway guard
+    }
+
+    // Closing phrase: cadence onto the tonic.
+    maybeRest();
+    processWalked(/*newRegion=*/false, /*isB=*/false, /*closing=*/true,
+                  /*isMotif=*/false);
+
+    // Register continuity (4.5-e, part 3): per-bar rescue. The phrase folds
+    // above keep whole phrases coherent, but a bar shared by two phrases (or a
+    // phrase whose compass still spans a boundary) can end up out of band.
+    // Walk the emitted bars in order against a running reference — the
+    // previous non-empty bar's (post-fold) centroid — and fold any offender by
+    // the nearest whole octaves that fit the scale range. Same stated rule,
+    // now guaranteed on the emitted timeline itself. Two refinements:
+    //   - The FINAL PHRASE (closing walk + cadence, including any density
+    //     pieces of the held tonic) folds as one atomic group, so no fold can
+    //     separate the approach note from its resolution or split the drone.
+    //   - When a whole-bar fold cannot fit the scale range (one low note
+    //     pinning a bar whose others sit an octave out), the out-of-band notes
+    //     that DO fit fold individually. That trades the bar's interval shape
+    //     for register continuity — the brief's sanctioned clamp-at-emission,
+    //     done as pitch-class-preserving octave moves; it fires only when the
+    //     interval-preserving fold is impossible.
+    if (ticksPerBar > 0 && !melody.notes.empty() &&
+        !melody.phraseStarts.empty()) {
+        // A bar breathes in the wider band when any of its notes belongs to a
+        // B phrase (interior even phrase index; the last phrase is closing).
+        const std::size_t phraseCount = melody.phraseStarts.size();
+        auto phraseOf = [&](std::size_t i) {
+            std::size_t p = 0;
+            for (std::size_t q = 0; q < phraseCount; ++q)
+                if (melody.phraseStarts[q] <= i) p = q;
+            return p;
+        };
+        auto foldGroup = [&](const std::vector<std::size_t>& idx, double cur,
+                             double ref, double band) {
+            const double diff = cur - ref;
+            if (std::fabs(diff) <= band) return cur;
+            long k = std::lround(diff / 12.0);
+            while (k != 0) {
+                bool fits = true;
+                for (std::size_t i : idx) {
+                    const int d = melody.degrees[i] -
+                                  static_cast<int>(k) * degreesPerOctave;
+                    if (d < kFoldEdgeMargin ||
+                        d >= totalDegrees - kFoldEdgeMargin) {
+                        fits = false;
+                        break;
+                    }
+                }
+                if (fits) {
+                    for (std::size_t i : idx) {
+                        melody.degrees[i] -=
+                            static_cast<int>(k) * degreesPerOctave;
+                        melody.notes[i].noteNumber = scale.noteAt(
+                            melody.degrees[i], options.octaveSpan);
+                    }
+                    return cur - 12.0 * static_cast<double>(k);
+                }
+                k += (k > 0) ? -1 : 1;  // a smaller fold may still fit
+            }
+            return cur;  // no interval-preserving fold fits
+        };
+        const std::size_t tailStart = melody.phraseStarts.back();
+        std::vector<std::vector<std::size_t>> byBar;
+        for (std::size_t i = 0; i < tailStart; ++i) {
+            const long bar = std::lround(melody.notes[i].startBeats *
+                                         kTicksPerBeat) /
+                             ticksPerBar;
+            if (static_cast<std::size_t>(bar) >= byBar.size())
+                byBar.resize(static_cast<std::size_t>(bar) + 1);
+            byBar[static_cast<std::size_t>(bar)].push_back(i);
+        }
+        double ref = -1.0;  // no previous bar yet
+        for (const std::vector<std::size_t>& idx : byBar) {
+            if (idx.empty()) continue;  // rest bar: reference carries over
+            double cur = 0.0;
+            bool anyB = false;
+            for (std::size_t i : idx) {
+                cur += melody.notes[i].noteNumber;
+                const std::size_t p = phraseOf(i);
+                if (p % 2 == 0 && p != 0 && p + 1 != phraseCount) anyB = true;
+            }
+            cur /= static_cast<double>(idx.size());
+            if (ref >= 0.0) {
+                const double band = anyB ? kRegisterBandB : kRegisterBandA;
+                cur = foldGroup(idx, cur, ref, band);
+                if (std::fabs(cur - ref) > band) {
+                    // Whole-bar fold blocked by the scale range: fold the
+                    // out-of-band notes that fit, one octave toward ref.
+                    const int dir = cur > ref ? 1 : -1;  // 1 = fold down
+                    double sum = 0.0;
+                    for (std::size_t i : idx) {
+                        int deg = melody.degrees[i];
+                        // Only notes out of band on the bar's excess side —
+                        // folding an opposite-side outlier would push it
+                        // further from the reference.
+                        while (dir * (scale.noteAt(deg, options.octaveSpan) -
+                                      ref) > band) {
+                            const int d = deg - dir * degreesPerOctave;
+                            if (d < kFoldEdgeMargin ||
+                                d >= totalDegrees - kFoldEdgeMargin)
+                                break;
+                            deg = d;
+                        }
+                        if (deg != melody.degrees[i]) {
+                            melody.degrees[i] = deg;
+                            melody.notes[i].noteNumber =
+                                scale.noteAt(deg, options.octaveSpan);
+                        }
+                        sum += melody.notes[i].noteNumber;
+                    }
+                    cur = sum / static_cast<double>(idx.size());
+                }
+            }
+            ref = cur;
+        }
+        // The final phrase, folded as one atomic group against the register
+        // the piece leaves it from. No per-note fallback here: the cadence's
+        // internal shape (approach step, held tonic, density pieces) is worth
+        // more than the last bar's band membership.
+        if (tailStart < melody.notes.size() && ref >= 0.0) {
+            std::vector<std::size_t> tail;
+            double cur = 0.0;
+            for (std::size_t i = tailStart; i < melody.notes.size(); ++i) {
+                tail.push_back(i);
+                cur += melody.notes[i].noteNumber;
+            }
+            cur /= static_cast<double>(tail.size());
+            const double folded = foldGroup(tail, cur, ref, kRegisterBandA);
+            if (folded != cur) cadenceFolded = true;
         }
     }
 
-    // Pass 2 (bug 4, 4a): now that every note has its REAL emitted start beat,
-    // re-decide the strong beat and chord-tone snap against that beat instead of
-    // the generation-time clock. Draws no rng (reuses the recorded snap coin), so
-    // it changes only pitches — timing/rests/RNG stream are untouched.
-    builder.reharmonizeAgainstRealBeats(melody, snapCoins, eligible);
+    // Cadence approach retune (4.5-e): a register fold may relocate the final
+    // tonic — in particular lift a cadence built at the range bottom, where
+    // finishClosingPhrase had no step below to use. Re-run the 4c approach
+    // rule on the folded geometry: leading tone below when the scale spells
+    // one, else the nearest neighbouring step. Pitch-only, draw-free, and
+    // skipped when the penultimate note already shares the tonic's pitch
+    // class (a density piece of the held tonic — not an approach note).
+    if (cadenceFolded && melody.notes.size() >= 2) {
+        const std::size_t n = melody.notes.size() - 1;
+        const int tonic = melody.degrees[n];
+        const int finalPc = wrap(melody.notes[n].noteNumber, 12);
+        const int prevPc = wrap(melody.notes[n - 1].noteNumber, 12);
+        const bool aboveOk = tonic + 1 < totalDegrees;
+        const bool belowOk = tonic - 1 >= 0;
+        if (prevPc != finalPc && (aboveOk || belowOk)) {
+            auto pcRel = [&](int degree) {
+                return scale.intervals[static_cast<std::size_t>(
+                           wrap(degree, degreesPerOctave))] % 12;
+            };
+            int stepDegree;
+            if (belowOk && pcRel(tonic - 1) == 11) {
+                stepDegree = tonic - 1;
+            } else if (aboveOk && belowOk) {
+                const int cur = melody.degrees[n - 1];
+                stepDegree = std::abs((tonic + 1) - cur) <=
+                                     std::abs((tonic - 1) - cur)
+                                 ? tonic + 1
+                                 : tonic - 1;
+            } else {
+                stepDegree = aboveOk ? tonic + 1 : tonic - 1;
+            }
+            melody.degrees[n - 1] = stepDegree;
+            melody.notes[n - 1].noteNumber =
+                scale.noteAt(stepDegree, options.octaveSpan);
+        }
+    }
+
+    // Ending sanity (4.5-f): trim the final cadence to the last bar line it
+    // already crosses, provided that still leaves the full cadential hold
+    // (kCadenceBeats). A cadence that overshoots a bar line by a fraction
+    // otherwise forces padToWholeBars (whose contract — seamless whole-bar
+    // loops — is untouched) to balloon it to the NEXT bar line: seed 30 Mona
+    // held 36.75→40.75, padded to 44.0 — a 7.25-beat terminal drone and a
+    // whole extra bar. Trimming to 40.0 keeps the drawn hold's intent (3.25
+    // beats), ends the piece a bar earlier, and the pad becomes a no-op.
+    // Duration-only, draw-free; never extends, never moves an onset. When no
+    // crossed bar line leaves kCadenceBeats of hold, the note is left alone
+    // and the pad still bounds the terminal at under beatsPerBar + 2 beats.
+    // Scoped to the looping path — without padToWholeBars there is no
+    // balloon, and a free-length piece may hold its cadence across a bar.
+    if (options.loopBars > 0 && !melody.notes.empty() &&
+        options.beatsPerBar > 0.0) {
+        Note& last = melody.notes.back();
+        const double end = last.startBeats + last.lengthBeats;
+        const double lastBarLine =
+            std::floor(end / options.beatsPerBar - 1e-9) * options.beatsPerBar;
+        if (lastBarLine > last.startBeats + kCadenceBeats - 1e-9 &&
+            lastBarLine < end - 1e-9) {
+            last.lengthBeats = lastBarLine - last.startBeats;
+        }
+    }
 
     melody.progression = builder.progression();  // carry harmony for Lock Harmony
     return melody;

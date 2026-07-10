@@ -1,3 +1,72 @@
+# Phase 4.5 — Session 4: register continuity (4.5-e) + ending sanity (4.5-f) + M4 (STOPPED at ear test)
+
+Branch `feature/clock-unification`, continuing from `9286a3b`. Full detail
+in `PHASE45_REPORT.md` §11; refreshed auditions in `auditions/phase45/`.
+Nothing merged; parent untouched.
+
+- **Inheritance:** the working tree held an uncommitted, non-compiling
+  4.5-e draft from a prior session. Reviewed, completed, and corrected
+  (cadence-pair fold separation; bottom-built cadence up-folds breaking the
+  leading-tone pin) before gating. Stated in the report.
+- **Commits (each gated: suite 24069/24069, determinism ×2 both fixtures,
+  invariants):**
+  - `da4d09d` re-baseline(4.5-e) — the stated register rule: 6 st band
+    (9 st for B), walk compass ±4 degrees, whole-phrase octave folds,
+    per-bar rescue with an atomic final-phrase group and a post-fold
+    cadence-approach retune. Canary vs `9286a3b`: timing/velocities
+    byte-identical 122/122 (default ornaments AND arp-0), pitch-only.
+  - `b5e4bd4` re-baseline(4.5-f) — final cadence trims to the bar line it
+    crosses when ≥ 2 beats of hold remain; seed 30: 11→10 bars, terminal
+    7.25→3.25 b. Seed-30 9→11 trace: 9→10 legitimate 4.5-b onsets,
+    10→11 pad artifact (fixed). padToWholeBars untouched.
+  - `cada2d7` metrics — M4 (mean + worst adjacent-bar centroid jump,
+    bars 1–8) in `--metrics` and the sweep CSV (append-only). G4 122/122.
+- **Gate result (60 seeds Mona):** M4 median 3.63 (old) / 3.75 (pre-fix) →
+  **2.73**; seeds with a single jump > 10 st: 16 / 20 → **0**; worst jump
+  17.67 → 9.67; reg_b 4.35 (old) → **3.76** (≤ ~4.9 holds); tripwire 0/60;
+  coupling-cure pin green. The stated rule beats the old world's
+  accidental glue on every register metric.
+- **STOP:** ear test on refreshed `auditions/phase45/` is the acceptance
+  gate. Listen notes in report §11 (incl. the three per-note-fallback
+  seeds 30/44/46).
+
+# Phase 4.5 — Sessions 2+3: clock unification BUILT (B+C complete; STOPPED at ear test)
+
+Branch `feature/clock-unification` off tag `pre-clock-unification`
+(`cc66e81`). Full detail in `PHASE45_REPORT.md`; auditions in
+`auditions/phase45/`. Nothing merged; parent untouched. NEW-WORLD
+re-baseline as commissioned — the old byte canary is void across 4.5-b.
+
+- **Commits (each gated: suite green, determinism ×2 both fixtures,
+  invariants):** 4.5-a coupling cure (`7eaddb2`, arp-0 byte-identical to the
+  tag — proven, 122/122), demo phrase column (`919127d`, G4), 4.5-b one
+  clock (`4f0b1a4`, walk+flatten fused, plan-then-walk, pass 2 + both
+  fictional clocks + cursor + gradient draw deleted, endings on REAL bars —
+  suite needed ZERO re-pins), 4.5-c tied anticipation (`731c771`, sliver→tie
+  rule, bar-line crossings now real), 4.5-d phrase-entry accent (`1f37a0e`,
+  the old accidental anchor as a stated rule, pitch-only).
+- **THE CURE, proven:** permanent test (influence 0↔0.9, 40 seeds, ornaments
+  ON ⇒ timing/velocity byte-equal) + at-scale check on ARM-1's full rider
+  set: **15/15 seeds, zero rhythm shifts, rider 12.3% → 0%.** Structural:
+  the timing skeleton is decided before any pitch exists.
+- **Verification battery:** 61 seeds × both fixtures — determinism 244/244
+  dump-pairs byte-identical; invariants 122/122 (960-grid, monophony,
+  phrase form, tonic cadence, bar counts). Suite 24069/24069.
+- **C.3 gate (B-phrase survival) — PASS with measured caveat:** 180-seed
+  four-state table: no-fix 5.40 / old ARM-1 4.42 / new 4.88 / new-with-C-1-
+  disabled 5.36. So C-1 verifiably still delivers (disable ⇒ collapse to
+  baseline); the old world's extra ~0.45 st was its double-harmonization
+  artifact (pass-1 fictional snaps under pass-2 real snaps), unreproducible
+  honestly. Tripwire 0/60. M1 reported, not gated.
+- **Auditions:** `auditions/phase45/mona-seed{30,2024,58,70}-{old,new}world
+  .mid` (110 BPM). Seed 70 = tied-anticipation showcase (note @23.75 holds
+  through bar 6). NOT pitch-only pairs — two worlds, listen comparatively.
+- **Ear test = the acceptance gate. STOP here.** If B-relatedness reads
+  weaker: honest levers are W or a real register rule, never the old
+  double-harmonization (report §10).
+
+---
+
 # Phase 4.5 — Session 1/3: clock trace (read-only, docs only)
 
 Deliverable: `CLOCK_TRACE.md` at this tip (`feature/motif-phrasing`). No
