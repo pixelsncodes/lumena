@@ -98,6 +98,14 @@ constexpr double kOctaveLiftProbability = 0.25;
 // around the phrase's start cell) beyond which the phrase takes a rising or
 // falling contour; inside the band it arches (Phase 3.5 contour selection).
 constexpr float kContourSlopeThreshold = 0.03f;
+// Variant C (C-1, related-region teleport): half-width of the cell window,
+// centred on motif A's anchor cell, that a B phrase's teleport is remapped
+// into. The image's own local coherence supplies the relatedness; W is the one
+// tunable (larger = fresher, smaller = more coherent). 2 on the 16-column demo
+// grid, scaled down for smaller grids (8x8 plugin -> 1). Compile-time on
+// purpose — an audition constant, not a user control.
+constexpr int kTeleportWindowBase = 2;
+constexpr int kTeleportWindowRefColumns = 16;
 
 }  // namespace
 
@@ -360,6 +368,8 @@ public:
     std::vector<PhraseNote> walkPhrase(int count, bool newRegion,
                                        bool tonicFifthEnding) {
         localBeat_ = 0.0;  // strong-beat tracking is per-phrase
+        shadowDCol_ = 0;   // pitch material follows the walk cell by default
+        shadowDRow_ = 0;
         if (newRegion) {
             // Teleport to a fresh region for the contrasting phrase B (the same
             // two rng draws as before, moved here so the contour can be selected
@@ -368,6 +378,33 @@ public:
             std::uniform_int_distribution<int> rowDist(0, grid_.rows() - 1);
             col_ = colDist(rng_);
             row_ = rowDist(rng_);
+            // Variant C (C-1, related-region teleport): remap where B's PITCH
+            // MATERIAL is read from — post-draw, both draws above kept verbatim
+            // (count + order). The drawn cell is remapped into a window centred
+            // on motif A's anchor, and the walk's brightness->degree blend
+            // (stepNote) reads that shadow region instead of the walk cell, so
+            // B's melodic material comes from a region the image itself relates
+            // to A's. The WALK ITSELF (cells, contour, gradients, velocities)
+            // stays on the drawn path untouched: the per-note gradient-identity
+            // draw (`|gradient| > 0.02f`, stepNote) is conditioned on the cell
+            // path, so moving the walk would fire it differently and shift the
+            // whole downstream stream — measured, not hypothetical: remapping
+            // col_/row_ directly here shifted onsets on ~50/60 seeds even with
+            // ornaments off. Reading the shadow region only through nextBiased's
+            // target (always exactly one draw) keeps the stream aligned by
+            // construction.
+            if (motifAnchorCol_ >= 0) {
+                const int w = std::max(
+                    1, kTeleportWindowBase * grid_.columns() /
+                           kTeleportWindowRefColumns);
+                const int span = 2 * w + 1;
+                const int relCol = std::clamp(
+                    motifAnchorCol_ + (col_ % span) - w, 0, grid_.columns() - 1);
+                const int relRow = std::clamp(
+                    motifAnchorRow_ + (row_ % span) - w, 0, grid_.rows() - 1);
+                shadowDCol_ = relCol - col_;
+                shadowDRow_ = relRow - row_;
+            }
         }
         contour_ = selectContour(col_, row_);
         contourIdx_ = 0;
@@ -476,6 +513,14 @@ public:
         std::uniform_int_distribution<int> pick(0, 3);
         const int deltaRandom = kDeltas[pick(rng_)];
         int delta = (uni01() < static_cast<double>(bias_)) ? deltaImage : deltaRandom;
+        // Variant B (register-rein): tighten the APPLIED transpose band to +/-1
+        // scale degree so A''/A''' stop scattering the register. Both draws above
+        // (pick :477, uni01 :478) are preserved verbatim — this is a post-draw
+        // clamp of the already-drawn value (no new draw, no reorder). The sign
+        // (the variation's direction/contour intent) is untouched; only the
+        // magnitude is reined.
+        if (delta > 1) delta = 1;
+        if (delta < -1) delta = -1;
         // Shrink the shift toward 0 until the whole motif fits in range.
         while (delta != 0 && (lo + delta < 0 || hi + delta >= totalDegrees_)) {
             delta += (delta > 0) ? -1 : 1;
@@ -490,7 +535,16 @@ public:
         // shifting every note by an octave preserves the motif's interval
         // content, so A'/A'' stays recognisable.
         std::uniform_real_distribution<double> lift(0.0, 1.0);
-        if (lift(rng_) < kOctaveLiftProbability) {
+        // Draw preserved verbatim (site :493) — the roll always consumes exactly
+        // one draw, whatever we decide to do with it.
+        const bool liftRolled = lift(rng_) < kOctaveLiftProbability;
+        // Variant B (register-rein): honour the roll, but never stack two lifts in
+        // a row. Each varyMotif call starts from motif A's home register, so a
+        // single applied lift is exactly one octave from home — cumulative octave
+        // displacement never exceeds +/-1 octave. Blocking consecutive lifts stops
+        // the whole back half of the melody from sitting an octave up.
+        bool liftedThisVariation = false;
+        if (liftRolled && !octaveLiftedLastVariation_) {
             int hi2 = std::numeric_limits<int>::min();
             for (const PhraseNote& n : v) hi2 = std::max(hi2, n.degree);
             if (hi2 + degreesPerOctave_ < totalDegrees_) {
@@ -498,8 +552,10 @@ public:
                     n.degree += degreesPerOctave_;
                     n.noteNumber = scale_.noteAt(n.degree, options_.octaveSpan);
                 }
+                liftedThisVariation = true;
             }
         }
+        octaveLiftedLastVariation_ = liftedThisVariation;
 
         // Slight rhythmic variation: retime one note to a neighbouring length.
         if (options_.rhythm == RhythmMode::Flowing) {
@@ -661,6 +717,48 @@ public:
     // forward onto Melody::progression (Lock Harmony).
     const std::vector<int>& progression() const { return progression_; }
 
+    // Variant C (C-1): records motif A's anchor cell so subsequent B-phrase
+    // teleports are remapped into a related window around it. Called once by
+    // generatePhrased right after phrase 0 is built. Draw-free.
+    void setMotifAnchor(int c, int r) {
+        motifAnchorCol_ = c;
+        motifAnchorRow_ = r;
+    }
+
+    // Variant C (C-3): open-ended B cadence. Snaps a B phrase's final note to
+    // the nearest scale degree with half-cadence function — the second (pitch
+    // class 2 above the root) or the fifth (pitch class 7), tie-break to the
+    // fifth — so B opens tension that the following A-family return answers,
+    // instead of parking on a resolved chord tone like every other phrase.
+    // Pitch-only, draw-free, applied to the returned phrase notes: the
+    // builder's Markov state (degree_) is deliberately left on the un-edited
+    // cadence so no generation state moves (the ending note is snap-ineligible
+    // in pass 2, so the edit sticks). Scales lacking both pitch classes (no 2nd
+    // or 5th to open on) are left unchanged. The closing phrase keeps its own
+    // 4c closed cadence untouched.
+    void openBPhraseCadence(std::vector<PhraseNote>& phrase) const {
+        if (phrase.empty()) return;
+        PhraseNote& last = phrase.back();
+        int best = -1;
+        int bestDist = std::numeric_limits<int>::max();
+        bool bestIsFifth = false;
+        for (int d = 0; d < totalDegrees_; ++d) {
+            const int pc = pitchClassOf(d);
+            const bool isFifth = (pc == 7);
+            if (!isFifth && pc != 2) continue;
+            const int dist = std::abs(d - last.degree);
+            if (dist < bestDist ||
+                (dist == bestDist && isFifth && !bestIsFifth)) {
+                best = d;
+                bestDist = dist;
+                bestIsFifth = isFifth;
+            }
+        }
+        if (best < 0 || best == last.degree) return;
+        last.degree = best;
+        last.noteNumber = scale_.noteAt(best, options_.octaveSpan);
+    }
+
     // Pass 2 of the 4a two-pass. Pass 1 (the walk + flatten above) established
     // every note's REAL emitted start beat, including rests and ornaments; here
     // we re-decide the strong beat and chord-tone snap against THAT beat rather
@@ -771,8 +869,20 @@ private:
             // Ports Freeform's proven blend (mapBrightnessToDegree + nextBiased)
             // into Phrased. nextBiased makes the same single rng draw as next(),
             // and at bias_=0 is byte-identical to next(), so this is draw-neutral.
+            // Variant C (C-1): a B phrase reads its blend brightness from the
+            // shadow cell — the walk cell translated into the related window
+            // around motif A's anchor — so B's material comes from a region
+            // related to A's while the walk itself (and the draw stream) stays
+            // on the drawn path. Zero offset (non-B phrases) reads the walk cell
+            // exactly as before.
+            const float materialBright =
+                (shadowDCol_ != 0 || shadowDRow_ != 0)
+                    ? grid_.valueAt(
+                          std::clamp(col_ + shadowDCol_, 0, grid_.columns() - 1),
+                          std::clamp(row_ + shadowDRow_, 0, grid_.rows() - 1))
+                    : brightness;
             const int imageTarget =
-                scales::mapBrightnessToDegree(brightness, totalDegrees_);
+                scales::mapBrightnessToDegree(materialBright, totalDegrees_);
             int next = static_cast<int>(chain_.nextBiased(
                 degree_, static_cast<float>(imageTarget), bias_));
 
@@ -1032,6 +1142,19 @@ private:
     std::size_t rhythmCursor_ = 0;
     // Mean grid local contrast (image detail), in [0,1]; steers template choice.
     double imageDetail_ = 0.0;
+    // Variant B (register-rein): whether the previous varyMotif call actually
+    // applied the octave lift, so consecutive lifts don't stack the whole back
+    // half of the melody an octave up. Reset per generation (fresh builder).
+    bool octaveLiftedLastVariation_ = false;
+    // Variant C: motif A's anchor cell (its first note's cell), set once after
+    // phrase 0 is built. -1 = not set (Freeform/closing paths never set it), in
+    // which case the B teleport stays the plain uniform draw.
+    int motifAnchorCol_ = -1;
+    int motifAnchorRow_ = -1;
+    // Variant C: per-phrase shadow offset from the walk cell to the related
+    // pitch-material cell (C-1). (0, 0) outside B phrases — reads the walk cell.
+    int shadowDCol_ = 0;
+    int shadowDRow_ = 0;
 };
 
 // The emitted duration of a templated note starting at `startBeat`: the beats
@@ -1159,6 +1282,9 @@ Melody generatePhrased(const BrightnessGrid& grid, const Scale& scale,
         builder.walkPhrase(motifLen, /*newRegion=*/false,
                            /*tonicFifthEnding=*/true);
     phrases.push_back(motif);
+    // Variant C (C-1): anchor the B-phrase teleport window on motif A's first
+    // cell, so every B draws its material from a region related to A's.
+    if (!motif.empty()) builder.setMotifAnchor(motif.front().col, motif.front().row);
 
     // Body: alternate variations of the motif (odd positions -> A', A'', ...)
     // with fresh contrasting phrases (even positions -> B). Always emit at least
@@ -1192,6 +1318,9 @@ Melody generatePhrased(const BrightnessGrid& grid, const Scale& scale,
         } else {
             phrase = builder.walkPhrase(motifLen, /*newRegion=*/true,
                                         /*tonicFifthEnding=*/true);  // B
+            // Variant C (C-3): B ends open (degree 2/5, half-cadence function)
+            // so the A return reads as the answer, not an arbitrary restart.
+            builder.openBPhraseCadence(phrase);
         }
         bodyNotes += static_cast<int>(phrase.size());
         phrases.push_back(std::move(phrase));

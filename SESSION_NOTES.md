@@ -1,3 +1,183 @@
+# Phase 4 tail — B-phrase pass · Variant B raw per-note diff (read-only)
+
+Direct MIDI note dump of the two audition renders (both hashes verified:
+baseline `599b674d…`, variant `77018a89…`). Both files are a **single melody track**
+(no accompaniment track in this phrased render), 37 notes each, PPQ 480.
+
+**Canary CONFIRMED (STEP-0 claim holds exactly):** 37 notes each · onsets
+**byte-identical** · durations **byte-identical** · **exactly 5 pitches changed, all
+DOWN 1–2 semitones**. No onset/duration difference anywhere. The 5 changes are one
+contiguous run — a single reined varyMotif phrase (bar 4, beats 13.0–17.0):
+
+| idx | onset | old → new | Δ |
+|---|---|---|---|
+| 15 | 13.00b | F5 (77) → D#5 (75) | −2 |
+| 16 | 13.50b | G5 (79) → F5 (77) | −2 |
+| 17 | 14.00b | D#4 (63) → D4 (62) | −1 |
+| 18 | 14.75b | D#4 (63) → D4 (62) | −1 |
+| 19 | 15.50b | D#4 (63) → D4 (62) | −1 |
+
+(Consistent with the transpose band tightening ±2→±1: this phrase's applied shift
+dropped one degree, pulling the whole run down toward home register.)
+
+**Velocities byte-identical** (raw sequence matches note-for-note across all 37):
+`[61,73,85,86,74,61,72,84,90,78,61,73,85,90,78,61,73,85,86,74,70,80,91,101,105,93,81,61,73,85,89,77,56,66,76,84,72]`.
+On seed 2024 the pitch changes did NOT trip the maybeOrnament coupling, so the RNG
+stream stayed aligned and dynamics are unchanged — the diff is purely those 5 pitches.
+
+---
+
+# Phase 4 tail — B-phrase pass · VARIANT B (register-rein) · AUDITION BRANCH
+
+Branch `feature/bphrase-register-rein` off tip `a9852a5`. **Audition only — DO NOT
+MERGE** until the user picks by ear. Engine/submodule only; parent untouched.
+
+## What changed (`MelodyGenerator.cpp`, all inside `varyMotif`)
+Keeps B genuinely fresh — the B-teleport (`:369/:370`) and `selectContour`
+(`:869-880`) are **untouched**, so B still picks its own contour. Only the register
+sprawl in `varyMotif` is reined, as two **post-draw clamps of already-drawn values**:
+1. **Transpose band tightened to ±1 degree** (was ±2). After `delta` is computed
+   from the preserved `pick :477` / `uni01 :478` draws, the applied magnitude is
+   clamped `[-1,+1]` (sign/direction free). New member `octaveLiftedLastVariation_`.
+2. **Octave-lift: no consecutive lifts.** The `lift :493` draw is kept verbatim
+   (`liftRolled`); the lift is applied only if it rolled AND the previous variation
+   didn't lift AND range has room, so the back half never sits ≥1 octave up and a
+   single lift stays exactly one octave from motif A's home register.
+
+**Draws confirmed preserved (count + order):** `pick :477`, `uni01 :478`, `lift :493`,
+and (Flowing) `which :507` / `rl :510` all fire exactly as before — no draw added,
+removed, or reordered. B-teleport `:369/:370` and the accumulator (`:1213/1293/1308`)
+untouched. Engine `LumenaTests` **22524/22524 green**. Both reins demonstrably fire
+(transpose pulls seen as −1/−2 semitone deltas; the octave-guard shows as |Δpitch|=12
+reversals on seeds 3/21/22/23/36/44).
+
+## Baselines (`--seed 2024 --tempo 110 --mode phrased --length 32 --loop-bars 8`, density 0)
+- **checkerboard** ×2 byte-identical to itself AND to the STEP-0 baseline:
+  `304db53d3d5a74153d9b07de172ba8f331a5b79ed46ca39b90c2c580288c47fb` (0 pitch changes
+  — the uniform fixture never sprawled, so nothing to rein). Determinism holds.
+- **Mona Lisa** (`mona_variantB.mid`):
+  `77018a89c95d476a45a11ddb96bdaaa956b29337da365a0458718fdb015c4177`.
+
+## Canary — deliverable seed 2024: PASS
+Checkerboard byte-identical (0/N pitch changed). Mona Lisa: 37→37 notes,
+**onsets+durations byte-identical, 5/37 pitches changed** (all pulled DOWN −1/−2
+semitones toward home register). Onset/duration stream intact on the deliverable.
+
+## ⚠️ STOP-AND-FLAG — pitch→ornament draw coupling (found by extended 60-seed sweep)
+Against a clean tip-`a9852a5` demo built in a worktree (verified: it reproduces the
+STEP-0 checkerboard/mona hashes exactly, same `-O3 -DNDEBUG` flags):
+- **51/60 seeds: onsets+durations byte-identical, pitch-only** — as intended.
+- **3/60 seeds (10, 26, 44): onsets/durations CHANGED.** Root cause is a **pre-existing
+  pitch→draw coupling in `maybeOrnament`**, NOT a draw my clamp adds: the ornament
+  fires on `coin < arpeggioAmount` (**default 0.15, active under the baseline
+  command**), then reads the site note's `src.degree` at `:564-568`. `dirPick(rng_)`
+  (`:568`) is drawn **only when `ascOk && descOk`** (short-circuit), and the
+  `!ascOk && !descOk` early-return (`:566`) decides whether a 3-note figure is
+  inserted at all. My register-rein lowers degrees, so on a few seeds an ornament
+  site crosses that range boundary → an extra `dirPick` draw and/or a +2-note figure
+  → the downstream stream (rests, `shape`, velocities, later pitches) shifts. Seed 10
+  = +2 notes (gate flip); seeds 26/44 = same count, shifted durations (`shape`/`dirPick`
+  outcome differs).
+- **This coupling is intrinsic to the engine** — *any* pitch-domain change (Variant A
+  too, or merely a different seed) trips it. It is the same family as the bug-4 /
+  two-clock pitch-feeds-stream issues. Eliminating it means making `maybeOrnament`'s
+  draw/insert decision pitch-independent — a change to the guardrailed ornament path
+  and its own re-baseline, **out of scope for an audition branch**. Not touched.
+- **Determinism is intact** (same seed ⇒ same output for both base and variant); this
+  is a re-baseline-scope question, not a nondeterminism bug.
+
+**Implication for the coordinator:** the deliverable (seed 2024) is a clean pitch-only
+re-baseline, but if Variant B is chosen, merging it is a pitch re-baseline that ALSO
+shifts *rhythm* on ~5% of seeds via the ornament coupling. Decide whether that scope is
+acceptable, or whether the merge should first neutralise the `maybeOrnament:566-568`
+coupling (separate, guardrailed, re-baselining task). Simpler reversible choice taken
+here: leave the coupling, document it, don't touch the ornament path.
+
+---
+
+# Phase 4 tail — B-phrase pitch-coherence pass · STEP 0 read-only re-confirm
+
+Read-only reconnaissance before commissioning the two audition variants (motif
+tie-back vs register-rein). **No source edits, no commits, no draw-order/accumulator
+touch.** Verified the two transforms against tip; captured the baseline references
+the variants will be diffed against.
+
+## Environment
+- Parent HEAD `ac7d576` (branch `feature/lumena-melody`); submodule HEAD
+  `a9852a5` (`phase1-complete-24-ga9852a5`, tip = Phase 4b-fix 2/2). This is the
+  accepted tip.
+- Engine `LumenaTests` (build-wsl): **22524/22524 green, 0 failed.**
+- Parent `lumen_tests` (build-linux): green **except** the one known
+  `wavetable SHA-256` golden — expected `62a3e9c6…`, actual `2431c02a…` (Windows-
+  pinned Lens hash, Linux FP differs; 1 of 2 checks in that test). **Nothing else
+  red.** Not melody, left as-is per handoff.
+
+## Doc-location note (not a blocker)
+The "read-only Timing-Coherence Diagnosis" is **not a standalone file in the repo**.
+Its conclusions survive only as (a) code comments that cite it — e.g.
+`MelodyGenerator.cpp:2024` (mutate skeleton), the teleport comment at `:353-359/:363-366`
+— and (b) handoff §3. Verified A–D **directly against the code at tip** (authoritative),
+which is what STEP 0 requires. Line numbers below are the real ones at `a9852a5`.
+
+## A — Rhythm coherence: CONFIRMED
+One groove is picked **once in the ctor** (`pickRhythmTemplate()` at `:322`; body
+`:946-975`, a single `discrete_distribution pick(rng_)` draw at `:972-973`). Every
+templated note's emitted length is `barAlignedDuration(beat, rhythmTemplate())`
+(`:1251`; def `:1045-1060`) tiled against the flatten accumulator. `varyMotif`'s
+retime (`:504-511`, sets `v[j].lengthBeats`) is a **dead write**: copied motif notes
+keep `templated=true` (set in `stepNote` `:830`), and emission takes
+`barAlignedDuration` for `templated && Flowing`, **ignoring `lengthBeats`** (`:1248-1252`).
+`nextDuration()` (`:913-918`) draws no RNG. So rhythm cannot desync from pitch. ✔
+
+## B — B-phrase teleport (PRIMARY): CONFIRMED
+Call site `builder.walkPhrase(motifLen, /*newRegion=*/true, …)` at **`:1193`** (handoff
+~:1193, exact) → `walkPhrase` `:360-384`, newRegion branch **`:363-371`** (handoff
+~:363-372). It **jumps to a random grid cell** — `colDist(rng_)` `:369` then
+`rowDist(rng_)` `:370` — then `selectContour(col_,row_)` (`:372`; def `:869-880`) picks
+a **fresh Rise/Fall/Arch contour** from the brightness slope at the new cell,
+**unrelated to motif A**, and `selectContour` draws **no RNG** (deterministic).
+**Teleport-specific draws: exactly 2, in order — col then row.** The `motifLen`
+interior notes then draw the ordinary per-note walk stream (see D); the phrase-final
+note draws only `chain_.nextBiased` (`:764`, snap is deterministic).
+
+## C — varyMotif transpose + octave-lift (SECONDARY): CONFIRMED
+Function `:447-513` (transpose+lift core `:467-502`, matches handoff). **Transpose
+range ±1..2 scale degrees:** random `delta ∈ {-2,-1,1,2}` (`kDeltas` `:475`) OR an
+image-led `deltaImage` clamped to `[-2,+2]`, nudged to ±1 if 0 (`:470-473`), then a
+shrink-to-fit loop keeps the motif in range (`:480-482`). **Octave lift** (`:488-502`):
+gated on `lift(rng_) < kOctaveLiftProbability` (**0.25**, `:96`) **and** range room
+`hi2 + degreesPerOctave_ < totalDegrees_` (`:496`); when it fires it hoists **every
+note by one full octave** (max single register jump = one octave, conditional).
+**Draws, in order:** `pick(rng_)` `:477` (random delta), `uni01()` `:478` (image-vs-
+random gate), `lift(rng_)` `:493` (octave-lift coin); **+2 in Flowing mode**:
+`which(rng_)` `:507`, `rl(rng_)` `:510` (the dead-write retime). Total **3 draws
+(non-Flowing) / 5 (Flowing)**.
+
+## D — Stream / accumulator: CONFIRMED
+One shared `std::mt19937` (`rng` → `PhraseBuilder(… rng)` → `rng_`); pitch, rhythm
+(template pick + varyMotif retime), and harmony (`pickOrDrawProgression` `:319`) all
+draw from it, draws frozen "for stream identity". The **flatten-loop `beat`** (`:1213`,
+`startBeats=beat` `:1293`, `beat += subLen` `:1308`, rests `:1237`) is the **sole
+emitted accumulator**; `localBeat_`/`harmonyBeat_` are pass-1 walk-clock only.
+**Draw sites variant work must preserve verbatim (count + order):** B → `:369` col,
+`:370` row. C → `:477` pick, `:478` uni01, `:493` lift (+ `:507`/`:510` in Flowing).
+Any pitch remap must reuse these exact draws, not add/reorder them.
+
+## Baseline references (current tip `a9852a5`, `--seed 2024 --tempo 110 --mode phrased --length 32 --loop-bars 8`, density 0)
+- **checkerboard** (determinism): SHA-256 `304db53d3d5a74153d9b07de172ba8f331a5b79ed46ca39b90c2c580288c47fb`
+  — regenerated **twice, byte-identical** ✔ (369 B).
+- **Mona Lisa** (audition): SHA-256 `599b674db29becb01a8a2f985ccee2a24411050e1be0acf5bbb51ce59dcca015` (367 B).
+- Artifacts held in the session scratchpad (not committed); the two variants diff
+  against these — checkerboard must stay byte-identical within each variant, Mona
+  Lisa is the ear test.
+
+**STOP-AND-FLAG:** none on the transforms — the code matches the handoff's model
+(line numbers essentially unmoved). The only deviation is documentary: the Diagnosis
+"doc" is code-comment + handoff, not a file (noted above). Safe to proceed to variant
+design; do NOT touch draw order or the accumulator.
+
+---
+
 # Phase 4b-fix — mutate bar-clamp + phrase-aware splice
 
 Baseline Phase 4c (`37a114f`). Two independent post-hoc defect fixes from the

@@ -126,6 +126,27 @@ Image makeGrey(int width, int height) {
     return Image(width, height, std::move(pixels));
 }
 
+// Phrase role by construction (generatePhrased): index 0 = motif A, last =
+// closing, interior odd = A-family variation slot, interior even = B. Variant C
+// gives B phrases their own contract (related-region material, open ending), so
+// role-aware tests split their expectations on this.
+bool isBPhrase(std::size_t p, std::size_t phraseCount) {
+    return p >= 2 && p + 1 < phraseCount && p % 2 == 0;
+}
+
+// Per-note phrase index from Melody::phraseStarts (valid when ornaments and
+// density are off, so PhraseNotes map 1:1 to emitted notes).
+std::vector<std::size_t> phraseIndexOfNotes(const std::vector<std::size_t>& starts,
+                                            std::size_t noteCount) {
+    std::vector<std::size_t> phraseOf(noteCount, 0);
+    for (std::size_t p = 0; p < starts.size(); ++p) {
+        const std::size_t end = p + 1 < starts.size() ? starts[p + 1] : noteCount;
+        for (std::size_t i = starts[p]; i < end && i < noteCount; ++i)
+            phraseOf[i] = p;
+    }
+    return phraseOf;
+}
+
 // The scale-degree deltas within a phrase [begin, end) of the degree track.
 // Transposing a motif preserves these, so two phrases sharing a delta signature
 // are the same motif (possibly transposed).
@@ -659,6 +680,12 @@ std::set<int> activeChordPcs(const Scale& scale, int root) {
 // PhraseNote maps 1:1 to an emitted note and each phrase's last note IS its
 // ending). Walked notes carry the generation-time chord root in dbgChordRoot;
 // copied/varied phrases clear it to -1 and are skipped.
+//
+// Variant C (C-3) re-baseline: B phrases now end OPEN on purpose — their final
+// note is snapped to the scale degree with pitch class 2 or 7 above the root
+// (half-cadence function), NOT to the active chord. So the chord-tone
+// expectation applies to non-B walked endings, and B endings get their own,
+// stricter pin: every one must carry the open pitch class.
 void test_phrased_endings_resolve_to_chord_tone() {
     const BrightnessGrid grid(makeCheckerboard(160, 120, 10), 16, 12);
     const Scale scale = minorPentatonic();
@@ -672,6 +699,7 @@ void test_phrased_endings_resolve_to_chord_tone() {
     o.imageRhythmAmount = 0.0;  // no density subdivision
 
     int endTot = 0, endChord = 0, midTot = 0, midChord = 0;
+    int bEndTot = 0, bEndOpen = 0;
     for (unsigned seed = 1; seed <= 20; ++seed) {
         std::mt19937 rng(seed);
         const Melody m = generateMelody(grid, scale, o, rng);
@@ -682,22 +710,37 @@ void test_phrased_endings_resolve_to_chord_tone() {
         for (std::size_t p = 0; p < m.phraseStarts.size(); ++p)
             phraseFinal.insert(
                 (p + 1 < m.phraseStarts.size() ? m.phraseStarts[p + 1] : n) - 1);
+        const std::vector<std::size_t> phraseOf =
+            phraseIndexOfNotes(m.phraseStarts, n);
 
         for (std::size_t i = 0; i < n; ++i) {
             const int root = m.dbgChordRoot[i];
             if (root < 0) continue;  // copied/varied phrase or the closing tonic
             const int pc = ((m.notes[i].noteNumber % 12) + 12) % 12;
             const bool isChord = activeChordPcs(scale, root).count(pc) == 1;
-            if (phraseFinal.count(i)) { ++endTot; endChord += isChord ? 1 : 0; }
-            else { ++midTot; midChord += isChord ? 1 : 0; }
+            if (phraseFinal.count(i)) {
+                if (isBPhrase(phraseOf[i], m.phraseStarts.size())) {
+                    // Variant C (C-3): a B ending opens on degree 2/5 — pitch
+                    // class 2 or 7 above the key root — every single time.
+                    const int rel =
+                        ((m.notes[i].noteNumber - scale.rootNote) % 12 + 12) % 12;
+                    ++bEndTot;
+                    bEndOpen += (rel == 2 || rel == 7) ? 1 : 0;
+                } else {
+                    ++endTot;
+                    endChord += isChord ? 1 : 0;
+                }
+            } else { ++midTot; midChord += isChord ? 1 : 0; }
         }
     }
     CHECK(endTot > 0);
     CHECK(midTot > 0);
     const double endRate = static_cast<double>(endChord) / endTot;
     const double midRate = static_cast<double>(midChord) / midTot;
-    CHECK(endRate >= 0.9);       // endings reliably land on the active chord
+    CHECK(endRate >= 0.9);       // non-B endings reliably land on the active chord
     CHECK(endRate > midRate);    // ...far more reliably than a mid-phrase note
+    CHECK(bEndTot > 0);
+    CHECK(bEndOpen == bEndTot);  // every B ending carries the open 2/5 function
 }
 
 // The closing cadence of a leading-tone scale (harmonic minor: leading tone C#,
@@ -1329,7 +1372,18 @@ void test_phrased_tracks_brightness_at_high_influence() {
             std::mt19937 rng(seed);
             const Melody m = generateMelody(grid, scale, opts, rng);
 
+            // Variant C (C-1/C-2) re-baseline: B phrases deliberately read
+            // their blend material from the related shadow region (possibly
+            // contrast-flipped), not from the walk cell recorded on the note,
+            // so the walk-cell reconstruction below no longer applies to them.
+            // The tracking contract is unchanged for every other walked note.
+            const std::vector<std::size_t> phraseOf =
+                phraseIndexOfNotes(m.phraseStarts, m.degrees.size());
+
             for (std::size_t i = 0; i < m.degrees.size(); ++i) {
+                if (!m.phraseStarts.empty() &&
+                    isBPhrase(phraseOf[i], m.phraseStarts.size()))
+                    continue;
                 // Reconstruct the note's source brightness exactly as the engine
                 // sampled it: from the grid cell recorded on the note.
                 const float b = grid.valueAt(m.cells[i].col, m.cells[i].row);
