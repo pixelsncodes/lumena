@@ -1,3 +1,62 @@
+# 2026-07-11 — PROMOTION TO MAIN (both repos), human-authorized
+
+Promoted the fully-tested feature work to `main` on both repos, submodule-first.
+
+**Human PM authorization (explicit, this session).** The human exercised the
+acceptance gate AGENT_RULES reserves for them: "PROMOTION AUTHORIZED … the
+merge-to-main decision — the acceptance gate AGENT_RULES reserves for me is
+hereby exercised. All seven features and the math docs have been ear/eye-tested
+and accepted by me across this project. You are authorized to perform the
+feature->main merges in Steps 1-3 and the corresponding pushes as my delegate."
+Parent write scope was limited by the PM to exactly (a) the submodule-pointer
+commit and (b) the `--no-ff` merge of `feature/lumena-melody` into parent `main`
+(plus this session-note pointer reconcile) — no other parent source writes.
+I stopped and asked before any merge because AGENT_RULES (parent read-only;
+"never merge / the human ear is the acceptance gate"); this promotion executes
+the human's recorded acceptance, not agent initiative.
+
+**Step 1 — submodule to main.** `main` (76ebc6c) fast-forwardable, `--no-ff`
+merge of `feature/motif-phrasing` (6993d6f) -> merge commit **8d642e2** (tree
+identical to feature tip). Engine suite on main: **24069/24069 checks, 0
+failed**. Pushed `origin/main`.
+
+**Step 2 — parent pointer reconcile.** On `feature/lumena-melody`, set submodule
+to 8d642e2, commit "Point submodule at lumena main" (57b4545). Pointer contained
+in `lumena/main` (verified).
+
+**Step 3 — parent to main.** Parent `main` (ffefef7) was a STALE pre-melody
+state (no submodule at all; it carried its own README tone-math doc PRs #1/#2).
+`merge-tree --write-tree` predicted a CLEAN merge (feature never touched the
+parent README, so main's tone-math docs are kept, melody source added — no
+conflict). `--no-ff` merge -> parent `main` tip **febde36** (this note adds one
+further pointer-reconcile commit on top). Submodule resolves to lumena/main tip.
+
+**Gate battery on main — ALL GREEN:**
+- Parent Windows suite (`lumen_tests.exe`): **ALL TESTS PASSED** (exit 0),
+  including the Windows-pinned wavetable golden and all three seed-2024
+  byte-identity sub-tests.
+- Determinism: **61/61 seeds × checkerboard × 2 renders byte-identical** (MIDI +
+  note-dump CSV); seed-2024 ×2 byte-identical (G2 minimum).
+- **Seed-2024 melody export SHA-256 = 2e37a1d96d279464e7c7424a1c930070c3f405e4fb22eab54c748980c8e83670**
+  — matches the pinned `2e37a1d9…3670` (DECISIONS.md octave-window entry) exactly.
+- Windows VST3 + standalone built via WSLg (VS2022/x64, Release, exit 0).
+- **pluginval --strictness-level 10: SUCCESS** (0 failures).
+- `git submodule status` resolves to lumena/main tip, contained in lumena/main.
+
+**Feature branches retained** (`feature/motif-phrasing`, `feature/lumena-melody`);
+no tags touched; no force-push/history-rewrite.
+
+**FLAG for a follow-up docs pass (not edited this session, per PM):** AGENT_RULES
+lines 18-19 read: "The parent suite's failing wavetable SHA-256 golden
+(Windows-pinned Lens hash) is pre-existing and unrelated. Ignore it." This can
+mislead — it reads as if the golden *fails on Windows*. In fact, on the Windows
+toolchain this run PASSED it (scan/spectral SHAs matched the pinned references);
+the golden only diverges on **Linux** floating-point and is the ignorable item
+there. Suggest rewording to "Linux-only wavetable SHA divergence (Windows-pinned
+Lens hash; passes on Windows, fails on Linux FP)" so the two goldens (this
+wavetable hash vs. the seed-2024 *melody* export hash, which must genuinely pass)
+can't be conflated.
+
 # 2026-07-11 — README 'the math': LaTeX escaping + F2 new-world wording (docs-only)
 
 Two fixes to the recast math section, no math content changed (word-diff
