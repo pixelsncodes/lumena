@@ -144,6 +144,27 @@ struct MelodyOptions {
 
     /// Beats per bar used for loop alignment (4.0 = common time).
     double beatsPerBar = 4.0;
+
+    /// Image-driven rhythmic density, in [0, 1] (Phase 3). 0 disables it: note
+    /// durations come purely from the session groove (the Phase-3 bar clock).
+    /// Above 0, each phrased note's local image contrast — the brightness range
+    /// in the cells around its source cell, i.e. detail/edges — subdivides it
+    /// into more, shorter notes: busy regions get denser rhythm, flat regions
+    /// stay long. Fully deterministic (a pure function of the grid, no RNG) and
+    /// always on the 960-tick grid. Only Phrased Melody mode consults it.
+    /// Defaults off so existing output and the RNG draw stream are unchanged;
+    /// the plugin will surface it as a "Density" / "Image Rhythm" control.
+    double imageRhythmAmount = 0.0;
+
+    /// Explicit chord progression to voice, as diatonic root degrees (0 = I,
+    /// 3 = IV, 4 = V, 5 = vi; the 4-degree base is tiled to the needed length).
+    /// EMPTY (the default) means "pick one at random from the seed" — exactly the
+    /// pre-4b behaviour, drawing one RNG value and leaving every existing baseline
+    /// byte-identical. When NON-empty the generator consumes NO RNG for the
+    /// progression and voices these roots instead: this backs "Lock Harmony",
+    /// where the previous run's progression (carried on `Melody::progression`) is
+    /// fed back so pitch/rhythm re-roll under a fixed harmony. Phase 4b.
+    std::vector<int> progression;
 };
 
 /// The lowest and highest MIDI velocity brightness maps onto.
@@ -174,7 +195,21 @@ struct GridCell {
 /// melodic intervals in scale steps without inverting the note mapping.
 struct Melody {
     std::vector<midi::Note> notes;
+
+    /// The scale degree each note occupies, in parallel with `notes`.
+    /// - Melody/Freeform/Phrased: the extended index into the melodic `scale`,
+    ///   satisfying `scale.noteAt(degrees[i], octaveSpan) == notes[i].noteNumber`.
+    /// - Arp/Chord: `-1`, meaning "not a Melody-scale degree" — these notes are
+    ///   voiced from the key's diatonic triads, not the melodic scale, so there
+    ///   is no valid index here; their identity lives in `chordTones`. Consumers
+    ///   that map a degree back through `scale.noteAt` must skip the sentinel.
     std::vector<int> degrees;
+
+    /// Chord-tone role of each note (0 = root, 1 = third, 2 = fifth, ...), in
+    /// parallel with `notes`. Populated only in Arp/Chord modes; empty in the
+    /// melodic modes (where notes are not chord tones). Kept as a separate track
+    /// rather than overloading `degrees`, so `degrees` keeps a single meaning.
+    std::vector<int> chordTones;
 
     /// The source grid cell for each note, in parallel with `notes` (so
     /// `cells.size() == notes.size()`). A note produced by transposing a motif
@@ -188,6 +223,26 @@ struct Melody {
     /// callers reason about phrase boundaries — e.g. the rests between them or
     /// where a motif repeats.
     std::vector<std::size_t> phraseStarts;
+
+    /// Diagnostics only (bug-4 measurement hook). Parallel with `notes` in
+    /// Phrased Melody mode; empty in every other mode. Never read by generation
+    /// or the MIDI path — they exist so a harness can score strong-beat and
+    /// chord-tone behaviour without reconstructing the engine's internal clocks.
+    /// - dbgStrong:    1 if the note fell on a strong beat when generated, else 0.
+    /// - dbgSnapped:   1 if stepNote snapped it to a chord tone (walked phrases
+    ///                 only; copied/varied phrases are 0), else 0.
+    /// - dbgChordRoot: the progression root degree the snap targeted, or -1.
+    std::vector<int> dbgStrong;
+    std::vector<int> dbgSnapped;
+    std::vector<int> dbgChordRoot;
+
+    /// The chord progression base this melody was voiced over, as diatonic root
+    /// degrees (0 = I, 3 = IV, 4 = V, 5 = vi) — the harmonic identity chosen at
+    /// generation time. Populated in Phrased, Arpeggio and Chords modes; empty in
+    /// Freeform (a flat Markov walk with no chord backbone) and for an empty
+    /// melody. Lets a caller carry the harmony forward into a re-generation via
+    /// `MelodyOptions::progression` — the mechanism behind "Lock Harmony" (4b).
+    std::vector<int> progression;
 };
 
 /// Runs the full melody walk: a theory-weighted Markov chain over scale degrees,
@@ -215,6 +270,7 @@ Melody generateMelody(const image::BrightnessGrid& grid,
 struct RegenLocks {
     bool rhythm = false;  ///< Keep each note's start/length (the timing track).
     bool pitch = false;   ///< Keep each note's pitch/degree (the melodic track).
+    bool harmony = false; ///< Keep the chord progression (fed via MelodyOptions).
 };
 
 /// Combines a `previous` melody with a freshly generated `candidate`, taking the

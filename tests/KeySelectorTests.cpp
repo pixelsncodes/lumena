@@ -89,7 +89,7 @@ void test_pure_red_is_c_blues() {
     CHECK(d.scale.intervals == intervalsFor(ScaleType::BluesMinor));
 }
 
-// Pure blue is vivid and very dark (luma ~0.11) -> Ab Harmonic Minor.
+// Pure blue is vivid and very dark (Rec.709 luma ~0.07) -> Ab Harmonic Minor.
 void test_pure_blue_is_harmonic_minor() {
     KeySelector sel;
     const KeyDetection d = sel.detect(solid(8, 8, 0, 0, 255));
@@ -101,19 +101,21 @@ void test_pure_blue_is_harmonic_minor() {
     CHECK(d.scale.rootNote == 68);
 }
 
-// Pure green is vivid, mid-bright (luma ~0.59) -> E Mixolydian (major family).
-void test_pure_green_is_e_mixolydian() {
+// Pure green is vivid and bright (Rec.709 luma ~0.72) -> E Major/Ionian.
+// (Under the old Rec.601 luma this was ~0.59 and landed on Mixolydian; the
+// luma-unification fix moves it up one step on the dark->bright mode axis.)
+void test_pure_green_is_e_major() {
     KeySelector sel;
     const KeyDetection d = sel.detect(solid(8, 8, 0, 255, 0));
 
     CHECK(d.position == 4);
-    CHECK(d.type == ScaleType::Mixolydian);
+    CHECK(d.type == ScaleType::Ionian);
     CHECK(d.major);
-    CHECK(d.scale.name == "E Mixolydian");
+    CHECK(d.scale.name == "E Major");
     CHECK(d.scale.rootNote == 64);
 }
 
-// Bright pastel red (sat ~0.30, luma ~0.79) -> mode axis lands on Ionian: C Major.
+// Bright pastel red (sat ~0.30, Rec.709 luma ~0.76) -> mode axis lands on Ionian: C Major.
 void test_pastel_red_is_c_major() {
     KeySelector sel;
     const KeyDetection d = sel.detect(solid(8, 8, 255, 178, 178));
@@ -195,7 +197,7 @@ void run_key_selector_tests() {
     test_choose_scale_type();
     test_pure_red_is_c_blues();
     test_pure_blue_is_harmonic_minor();
-    test_pure_green_is_e_mixolydian();
+    test_pure_green_is_e_major();
     test_pastel_red_is_c_major();
     test_pastel_green_is_e_lydian();
     test_grayscale_fallback();

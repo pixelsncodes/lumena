@@ -2,8 +2,10 @@
 // coherence via the grid random walk + low brightness bias), brightness-driven
 // velocity written into the MIDI byte stream, and Flowing/Straight rhythm.
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <random>
 #include <set>
 #include <vector>
@@ -14,6 +16,7 @@
 #include "midi/MidiFileWriter.h"
 #include "midi/MidiSequence.h"
 #include "scales/Scale.h"
+#include "scales/ScaleLibrary.h"
 #include "test_util.h"
 
 namespace {
@@ -27,11 +30,15 @@ using lumena::melody::kMaxVelocity;
 using lumena::melody::kMinVelocity;
 using lumena::melody::Melody;
 using lumena::melody::MelodyOptions;
+using lumena::melody::mutate;
 using lumena::melody::PhraseMode;
+using lumena::melody::recombineLocked;
+using lumena::melody::RegenLocks;
 using lumena::melody::RhythmMode;
 using lumena::midi::MidiFileWriter;
 using lumena::midi::MidiSequence;
 using lumena::midi::Note;
+using lumena::scales::mapBrightnessToDegree;
 using lumena::scales::Scale;
 
 // A smooth 2-D brightness ramp: brightness rises with both x and y, so any two
@@ -64,8 +71,80 @@ Image makeBright(int width, int height) {
     return Image(width, height, std::move(pixels));
 }
 
+// A per-grid-cell checkerboard: each `cellPx`-sized block flips between black
+// and white, so with a matching grid resolution every cell's 8-neighbourhood
+// spans the full 0..1 range — maximal local contrast, the density hook's cue to
+// subdivide. (makeBright, by contrast, has ~zero local contrast everywhere.)
+Image makeCheckerboard(int width, int height, int cellPx) {
+    std::vector<std::uint8_t> pixels(
+        static_cast<std::size_t>(width) * height * 4, 0);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const bool on = (((x / cellPx) + (y / cellPx)) % 2) == 0;
+            const auto g = static_cast<std::uint8_t>(on ? 255 : 0);
+            const std::size_t i =
+                (static_cast<std::size_t>(y) * width + x) * 4;
+            pixels[i + 0] = g;
+            pixels[i + 1] = g;
+            pixels[i + 2] = g;
+            pixels[i + 3] = 255;
+        }
+    }
+    return Image(width, height, std::move(pixels));
+}
+
 Scale minorPentatonic() {
     return Scale{"A Minor Pentatonic", 57, {0, 3, 5, 7, 10}};
+}
+
+// D Harmonic Minor: like natural minor but with a RAISED 7th (interval 11, a
+// leading tone). Root D = MIDI 62 (pitch class 2); the leading tone is C#
+// (pitch class (2 + 11) % 12 == 1). Chords/Arp must spell the V from the scale's
+// own 7th, so the V is major (A-C#-E) and pitch class 1 is emitted. (Bug 5: the
+// engine currently spells from kMinorSteps and drops the raised 7th.)
+Scale dHarmonicMinor() {
+    return Scale{"D Harmonic Minor", 62, {0, 2, 3, 5, 7, 8, 11}};
+}
+
+// A Blues (minor blues): minor pentatonic plus the ♭5 blue note (interval 6).
+// Root A = MIDI 57 (pitch class 9). Its ♭7 is G (pitch class (9 + 10) % 12 == 7).
+// Because it is a 6-note scale it drops through diatonicChord's non-7-degree
+// fallback, which spells a plain minor triad and silently loses the ♭7. Phase 4a
+// makes the arp voice a real minor-7th (A-C-E-G) so the blue ♭7 sounds, every
+// tone staying inside the parent A-minor key.
+Scale aBlues() {
+    return Scale{"A Blues", 57, {0, 3, 5, 6, 7, 10}};
+}
+
+// A flat mid-grey image: every cell reads ~0.5, safely below the arp's
+// brightness>0.82 octave-jump threshold, so the emitted pitches are exactly the
+// arp cycle with no image-driven octave lifts — lets a test read the raw figure.
+Image makeGrey(int width, int height) {
+    std::vector<std::uint8_t> pixels(
+        static_cast<std::size_t>(width) * height * 4, 128);
+    for (std::size_t i = 3; i < pixels.size(); i += 4) pixels[i] = 255;  // alpha
+    return Image(width, height, std::move(pixels));
+}
+
+// Phrase role by construction (generatePhrased): index 0 = motif A, last =
+// closing, interior odd = A-family variation slot, interior even = B. Variant C
+// gives B phrases their own contract (related-region material, open ending), so
+// role-aware tests split their expectations on this.
+bool isBPhrase(std::size_t p, std::size_t phraseCount) {
+    return p >= 2 && p + 1 < phraseCount && p % 2 == 0;
+}
+
+// Per-note phrase index from Melody::phraseStarts (valid when ornaments and
+// density are off, so PhraseNotes map 1:1 to emitted notes).
+std::vector<std::size_t> phraseIndexOfNotes(const std::vector<std::size_t>& starts,
+                                            std::size_t noteCount) {
+    std::vector<std::size_t> phraseOf(noteCount, 0);
+    for (std::size_t p = 0; p < starts.size(); ++p) {
+        const std::size_t end = p + 1 < starts.size() ? starts[p + 1] : noteCount;
+        for (std::size_t i = starts[p]; i < end && i < noteCount; ++i)
+            phraseOf[i] = p;
+    }
+    return phraseOf;
 }
 
 // The scale-degree deltas within a phrase [begin, end) of the degree track.
@@ -496,6 +575,56 @@ void test_phrased_dynamics_peak_mid_phrase() {
     }
 }
 
+// ---- phrased mode: dynamics move smoothly, no per-beat whiplash -------------
+
+// Within a phrase, consecutive notes' velocities must not stab between extremes:
+// the generator low-passes the brightness tint and slew-caps the note-to-note
+// change to kMaxDynStep. At Energy 0.5 the post-generation energy scale is
+// exactly 1.0, so the emitted velocities carry the cap verbatim. (Jumps ACROSS a
+// phrase boundary are a fresh dynamic gesture and deliberately not capped, so the
+// check runs within each phrase, using phraseStarts.)
+void test_phrased_dynamics_are_smooth() {
+    constexpr int kMaxDynStep = 12;  // must match MelodyGenerator.cpp
+    const Image image = makeDiagonalGradient(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = minorPentatonic();
+
+    long maxWithinPhraseJump = 0;
+    int lo = 200, hi = 0;
+    for (unsigned seed = 1; seed <= 80; ++seed) {
+        MelodyOptions opts;
+        opts.length = 40;
+        opts.phraseMode = PhraseMode::Phrased;
+        opts.rhythm = RhythmMode::Flowing;
+        opts.energy = 0.5;         // energy scale == 1.0 -> the cap is exact
+        opts.arpeggioAmount = 0.0; // isolate the contour from ornaments
+        std::mt19937 rng(seed);
+        const Melody m = generateMelody(grid, scale, opts, rng);
+
+        const std::vector<std::size_t>& starts = m.phraseStarts;
+        CHECK(!starts.empty());
+        for (std::size_t p = 0; p < starts.size(); ++p) {
+            const std::size_t begin = starts[p];
+            const std::size_t end =
+                (p + 1 < starts.size()) ? starts[p + 1] : m.notes.size();
+            for (std::size_t i = begin + 1; i < end; ++i) {
+                const int d =
+                    std::abs(m.notes[i].velocity - m.notes[i - 1].velocity);
+                CHECK(d <= kMaxDynStep);  // no per-beat stab within a phrase
+                if (d > maxWithinPhraseJump) maxWithinPhraseJump = d;
+            }
+        }
+        for (const Note& n : m.notes) {
+            lo = std::min(lo, n.velocity);
+            hi = std::max(hi, n.velocity);
+        }
+    }
+    // Expression preserved: the fix removes whiplash, not the dynamic range.
+    CHECK(hi - lo >= 30);
+    // And the cap is genuinely exercised (guards against a vacuously flat pass).
+    CHECK(maxWithinPhraseJump >= 8);
+}
+
 // ---- phrased mode: the final tonic is approached by step, not a leap --------
 
 void test_phrased_ending_is_stepwise() {
@@ -519,6 +648,195 @@ void test_phrased_ending_is_stepwise() {
         CHECK(std::abs(delta) >= 1);
         CHECK(std::abs(delta) <= 2);
     }
+}
+
+// ---- Phase 4c: cadences / phrase endings -----------------------------------
+
+// The pitch classes of a diatonic triad on progression root degree `root`,
+// spelled exactly as the engine's updateHarmonyTarget (parent major/minor triad,
+// so it is a real chord even over a pentatonic melodic scale).
+std::set<int> activeChordPcs(const Scale& scale, int root) {
+    const int minorSteps[7] = {0, 2, 3, 5, 7, 8, 10};
+    const int majorSteps[7] = {0, 2, 4, 5, 7, 9, 11};
+    bool hasM3 = false, hasm3 = false;
+    for (int iv : scale.intervals) {
+        const int pc = ((iv % 12) + 12) % 12;
+        if (pc == 4) hasM3 = true;
+        if (pc == 3) hasm3 = true;
+    }
+    const int* steps = (hasM3 && ! hasm3) ? majorSteps : minorSteps;
+    const int tonicPc = ((scale.rootNote % 12) + 12) % 12;
+    std::set<int> pcs;
+    for (int k = 0; k < 3; ++k) {
+        const int deg = (((root + 2 * k) % 7) + 7) % 7;
+        pcs.insert(((tonicPc + steps[deg]) % 12 + 12) % 12);
+    }
+    return pcs;
+}
+
+// A walked phrase ending resolves to a chord tone of the ACTIVE harmony (the bar
+// it ends over) far more reliably than a mid-phrase note does — landing, not
+// drifting. Measured on the checkerboard with ornaments/density OFF (so every
+// PhraseNote maps 1:1 to an emitted note and each phrase's last note IS its
+// ending). Walked notes carry the generation-time chord root in dbgChordRoot;
+// copied/varied phrases clear it to -1 and are skipped.
+//
+// Variant C (C-3) re-baseline: B phrases now end OPEN on purpose — their final
+// note is snapped to the scale degree with pitch class 2 or 7 above the root
+// (half-cadence function), NOT to the active chord. So the chord-tone
+// expectation applies to non-B walked endings, and B endings get their own,
+// stricter pin: every one must carry the open pitch class.
+void test_phrased_endings_resolve_to_chord_tone() {
+    const BrightnessGrid grid(makeCheckerboard(160, 120, 10), 16, 12);
+    const Scale scale = minorPentatonic();
+
+    MelodyOptions o;
+    o.phraseMode = PhraseMode::Phrased;
+    o.length = 32;
+    o.loopBars = 8;
+    o.beatsPerBar = 4.0;
+    o.arpeggioAmount = 0.0;     // no ornaments: 1:1 PhraseNote -> Note
+    o.imageRhythmAmount = 0.0;  // no density subdivision
+
+    int endTot = 0, endChord = 0, midTot = 0, midChord = 0;
+    int bEndTot = 0, bEndOpen = 0;
+    for (unsigned seed = 1; seed <= 20; ++seed) {
+        std::mt19937 rng(seed);
+        const Melody m = generateMelody(grid, scale, o, rng);
+        const std::size_t n = m.notes.size();
+        if (n == 0 || m.dbgChordRoot.size() != n) continue;
+
+        std::set<std::size_t> phraseFinal;
+        for (std::size_t p = 0; p < m.phraseStarts.size(); ++p)
+            phraseFinal.insert(
+                (p + 1 < m.phraseStarts.size() ? m.phraseStarts[p + 1] : n) - 1);
+        const std::vector<std::size_t> phraseOf =
+            phraseIndexOfNotes(m.phraseStarts, n);
+
+        for (std::size_t i = 0; i < n; ++i) {
+            const int root = m.dbgChordRoot[i];
+            if (root < 0) continue;  // copied/varied phrase or the closing tonic
+            const int pc = ((m.notes[i].noteNumber % 12) + 12) % 12;
+            const bool isChord = activeChordPcs(scale, root).count(pc) == 1;
+            if (phraseFinal.count(i)) {
+                if (isBPhrase(phraseOf[i], m.phraseStarts.size())) {
+                    // Variant C (C-3): a B ending opens on degree 2/5 — pitch
+                    // class 2 or 7 above the key root — every single time.
+                    const int rel =
+                        ((m.notes[i].noteNumber - scale.rootNote) % 12 + 12) % 12;
+                    ++bEndTot;
+                    bEndOpen += (rel == 2 || rel == 7) ? 1 : 0;
+                } else {
+                    ++endTot;
+                    endChord += isChord ? 1 : 0;
+                }
+            } else { ++midTot; midChord += isChord ? 1 : 0; }
+        }
+    }
+    CHECK(endTot > 0);
+    CHECK(midTot > 0);
+    const double endRate = static_cast<double>(endChord) / endTot;
+    const double midRate = static_cast<double>(midChord) / midTot;
+    CHECK(endRate >= 0.9);       // non-B endings reliably land on the active chord
+    CHECK(endRate > midRate);    // ...far more reliably than a mid-phrase note
+    CHECK(bEndTot > 0);
+    CHECK(bEndOpen == bEndTot);  // every B ending carries the open 2/5 function
+}
+
+// The closing cadence of a leading-tone scale (harmonic minor: leading tone C#,
+// pitch class 1) resolves the final tonic THROUGH the leading tone — approaching
+// from a semitone below — WHENEVER the harmony supports it, i.e. whenever the
+// final tonic is not the very bottom of the range (so a scale step below exists).
+// The final note is always the tonic, held for a cadential length. When the tonic
+// lands at the bottom (no step below) the cadence approaches from above instead,
+// which is correct — so the invariant is "leading tone every time it is possible".
+void test_harmonic_minor_cadence_uses_leading_tone() {
+    const BrightnessGrid grid(makeCheckerboard(160, 120, 10), 16, 12);
+    const Scale scale = dHarmonicMinor();
+    const int tonicPc = ((scale.rootNote % 12) + 12) % 12;          // D = 2
+    const int leadingTonePc = ((scale.rootNote % 12) + 11) % 12;    // C# = 1
+
+    int possible = 0, leadingWhenPossible = 0;
+    for (unsigned seed = 1; seed <= 40; ++seed) {
+        MelodyOptions o;
+        o.phraseMode = PhraseMode::Phrased;
+        o.length = 24;
+        o.arpeggioAmount = 0.0;     // no ornaments: the last two notes are the cadence
+        o.imageRhythmAmount = 0.0;
+        std::mt19937 rng(seed);
+        const Melody m = generateMelody(grid, scale, o, rng);
+        const std::size_t n = m.notes.size();
+        if (n < 2) continue;
+
+        CHECK(((m.notes[n - 1].noteNumber % 12) + 12) % 12 == tonicPc);  // land on tonic
+        CHECK(m.notes[n - 1].lengthBeats >= 2.0);                        // cadential length
+        // A scale step below the final tonic exists iff its degree is > 0.
+        if (m.degrees[n - 1] > 0) {
+            ++possible;
+            if (((m.notes[n - 2].noteNumber % 12) + 12) % 12 == leadingTonePc)
+                ++leadingWhenPossible;
+        }
+    }
+    CHECK(possible > 0);                         // the case actually arises
+    CHECK(leadingWhenPossible == possible);      // leading tone used every time it can be
+}
+
+// The ending path is deterministic: same image + settings + seed => identical
+// MIDI, including the cadence changes (harmonic-minor leading tone + chord-tone
+// resolution). Exercised on the checkerboard (exact, reproducible).
+void test_phrased_cadence_deterministic() {
+    const BrightnessGrid grid(makeCheckerboard(160, 120, 10), 16, 12);
+    const Scale scale = dHarmonicMinor();
+
+    MelodyOptions o;
+    o.phraseMode = PhraseMode::Phrased;
+    o.length = 32;
+    o.loopBars = 8;
+    std::mt19937 a(2024u), b(2024u);
+    const Melody m1 = generateMelody(grid, scale, o, a);
+    const Melody m2 = generateMelody(grid, scale, o, b);
+
+    CHECK(m1.notes.size() == m2.notes.size());
+    bool identical = m1.notes.size() == m2.notes.size();
+    for (std::size_t i = 0; i < m1.notes.size() && identical; ++i) {
+        if (m1.notes[i].noteNumber != m2.notes[i].noteNumber ||
+            m1.notes[i].velocity != m2.notes[i].velocity ||
+            m1.notes[i].startBeats != m2.notes[i].startBeats ||
+            m1.notes[i].lengthBeats != m2.notes[i].lengthBeats)
+            identical = false;
+    }
+    CHECK(identical);
+}
+
+// Every non-closing phrase's final note settles to a cadential length (>= a
+// dotted quarter) so phrases land instead of cutting off. Checked on the
+// checkerboard with ornaments/density off (1:1 PhraseNote -> Note, so the last
+// note of each phrase is its ending). The closing phrase (the last one) has its
+// own, longer cadence length and is excluded.
+void test_phrase_endings_settle_longer() {
+    const BrightnessGrid grid(makeCheckerboard(160, 120, 10), 16, 12);
+    const Scale scale = minorPentatonic();
+
+    MelodyOptions o;
+    o.phraseMode = PhraseMode::Phrased;
+    o.length = 32;
+    o.loopBars = 8;
+    o.arpeggioAmount = 0.0;
+    o.imageRhythmAmount = 0.0;
+
+    int checked = 0;
+    for (unsigned seed = 1; seed <= 20; ++seed) {
+        std::mt19937 rng(seed);
+        const Melody m = generateMelody(grid, scale, o, rng);
+        if (m.notes.empty() || m.phraseStarts.size() < 2) continue;
+        // Phrases 0 .. size-2 are the non-closing phrases (the last is the cadence).
+        for (std::size_t p = 0; p + 1 < m.phraseStarts.size(); ++p) {
+            const std::size_t end = m.phraseStarts[p + 1] - 1;
+            CHECK(m.notes[end].lengthBeats >= 1.5 - 1e-9);  // settled, not abrupt
+            ++checked;
+        }
+    }
+    CHECK(checked > 0);
 }
 
 // ---- source cells: parallel track, in range, and tracking the walk ----------
@@ -895,6 +1213,366 @@ void test_chords_are_diatonic_stacks() {
     }
 }
 
+// ---- bug 5: harmonic-minor leading tone (FAILING until the fix) --------------
+// Chords/Arp spell diatonic triads from kMajorSteps/kMinorSteps chosen by
+// scaleIsMajor(), never consulting the detected scale's own intervals. So a
+// harmonic-minor scale is spelled as natural minor, losing its raised 7th: the V
+// chord comes out minor (A-C-E) instead of major (A-C#-E) and the leading tone
+// (pitch class 1 for D harmonic minor) is never emitted. The V degree is in
+// every progression template, so ~4 bars always renders it — a correct spelling
+// WOULD emit pitch class 1. These two tests assert it does; they FAIL today.
+void test_chords_spell_harmonic_minor_leading_tone() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = dHarmonicMinor();
+    const int leadingTonePc = ((scale.rootNote % 12) + 11) % 12;  // C# = 1
+
+    MelodyOptions o;
+    o.mode = lumena::melody::GenerationMode::Chords;
+    o.chordSize = 3;
+    o.energy = 0.5;      // one chord per bar
+    o.loopBars = 4;      // one full I/IV/V/vi progression cycle
+    o.beatsPerBar = 4.0;
+    std::mt19937 rng(4u);
+    const Melody m = generateMelody(grid, scale, o, rng);
+
+    std::set<int> pcs;
+    for (const Note& n : m.notes) pcs.insert(((n.noteNumber % 12) + 12) % 12);
+    // The raised 7th (leading tone) must appear — it is the third of the V chord.
+    CHECK(pcs.count(leadingTonePc) == 1);
+}
+
+void test_arpeggio_spells_harmonic_minor_leading_tone() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = dHarmonicMinor();
+    const int leadingTonePc = ((scale.rootNote % 12) + 11) % 12;  // C# = 1
+
+    MelodyOptions o;
+    o.mode = lumena::melody::GenerationMode::Arpeggio;
+    o.arpPattern = ArpPattern::Up;
+    o.arpOctaves = 2;
+    o.arpRate = 0.5;
+    o.loopBars = 4;      // 4 bars of eighths = 32 notes, one full progression cycle
+    std::mt19937 rng(11u);
+    const Melody m = generateMelody(grid, scale, o, rng);
+
+    std::set<int> pcs;
+    for (const Note& n : m.notes) pcs.insert(((n.noteNumber % 12) + 12) % 12);
+    CHECK(pcs.count(leadingTonePc) == 1);
+}
+
+// ---- Phase 4a: scale-aware arps --------------------------------------------
+// Blues is a 6-note scale, so it falls through diatonicChord's non-7-degree
+// fallback which spells a plain minor triad and drops the ♭7 blue note. The arp
+// must instead voice a real minor-7th (root-♭3-5-♭7) so the ♭7 sounds. The
+// seventh is recorded as chord-tone role 3 (0=root,1=third,2=fifth,3=seventh),
+// which a triad-only arp never produces; and every emitted tone must stay inside
+// the parent minor key (no chromatic tone introduced to "complete" the chord).
+void test_arpeggio_blues_spells_in_scale_seventh() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = aBlues();
+
+    MelodyOptions o;
+    o.mode = lumena::melody::GenerationMode::Arpeggio;
+    o.arpPattern = ArpPattern::Up;
+    o.arpOctaves = 2;
+    o.arpRate = 0.5;
+    o.loopBars = 4;      // one full progression cycle: every chord degree renders
+    std::mt19937 rng(11u);
+    const Melody m = generateMelody(grid, scale, o, rng);
+
+    // A seventh (role 3) is spelled somewhere — the blue ♭7 sounds.
+    bool sawSeventh = false;
+    for (int role : m.chordTones)
+        if (role == 3) sawSeventh = true;
+    CHECK(sawSeventh);
+
+    // Nothing chromatic: every tone is diatonic to the parent minor key.
+    const std::set<int> keyPcs = keyScalePcs(scale);
+    for (const Note& n : m.notes)
+        CHECK(keyPcs.count(((n.noteNumber % 12) + 12) % 12) == 1);
+}
+
+// A triad-flavoured scale (minor pentatonic) arp resolves up to the octave: the
+// ascent spells 1-3-5-8, so the root pitch class appears at two octaves a 12
+// apart within a single-octave figure. On the pre-4a arp (1-3-5, no cap) the
+// one-octave figure has a single root, so this fails; the octave cap makes it
+// pass. A flat grey image keeps the arp off the brightness octave-jump path so
+// the pitches are exactly the cycle. Triad scales stay triads: no seventh.
+void test_arpeggio_resolves_to_octave() {
+    const Image image = makeGrey(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = minorPentatonic();
+
+    MelodyOptions o;
+    o.mode = lumena::melody::GenerationMode::Arpeggio;
+    o.arpPattern = ArpPattern::Up;
+    o.arpOctaves = 1;    // one octave, so the "8" can only come from the cap
+    o.arpRate = 0.5;
+    o.loopBars = 2;
+    std::mt19937 rng(7u);
+    const Melody m = generateMelody(grid, scale, o, rng);
+
+    // The lowest note is a chord root (role 0); the same pitch class recurs an
+    // octave above it — the 8 of 1-3-5-8.
+    int lowRoot = 128;
+    for (std::size_t i = 0; i < m.notes.size(); ++i)
+        if (m.chordTones[i] == 0) lowRoot = std::min(lowRoot, m.notes[i].noteNumber);
+    CHECK(lowRoot < 128);
+    bool sawOctave = false;
+    for (const Note& n : m.notes)
+        if (n.noteNumber == lowRoot + 12) sawOctave = true;
+    CHECK(sawOctave);
+
+    // A pure triad scale never spells a seventh.
+    for (int role : m.chordTones) CHECK(role != 3);
+}
+
+// ---- Phase 2: brightness -> pitch blend (FAILING until the blend lands) ------
+// The product promise: at Image Influence = 1.0 the melody should track the
+// image. Concretely, in PHRASED mode a walked note's scale degree should equal
+// the degree its source cell's brightness maps to (scales::mapBrightnessToDegree,
+// exactly as Freeform already does at MelodyGenerator.cpp:182-183). Today Phrased
+// mode has NO brightness->degree blend: its only image coupling is a weak,
+// direction-only +-1 gradient nudge (MelodyGenerator.cpp:632), which never sets
+// the degree to the brightness target. So raising Image Influence from 0.0 to
+// 1.0 barely changes how many notes land on their cell's brightness degree.
+//
+// This test counts, over many seeds, how many emitted notes sit exactly on
+// mapBrightnessToDegree(source_brightness) at Influence 0.0 vs 1.0, and asserts
+// the 1.0 count is CLEARLY greater (at least double). On 9242e9c the two counts
+// are ~equal, so it FAILS; once the blend
+//   finalDegree = snapToScale(blend(markovDegree, imageTargetDegree, influence))
+// is added (Influence 1.0 => degree == imageTarget on walked notes), it passes.
+void test_phrased_tracks_brightness_at_high_influence() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const int cols = 16, rows = 12;
+    const BrightnessGrid grid(image, cols, rows);
+    const Scale scale = minorPentatonic();
+    const int octaveSpan = 2;                              // MelodyOptions default
+    const int totalDegrees = scale.usableDegrees(octaveSpan);
+
+    // Count notes whose degree == the degree their source cell's brightness maps
+    // to, summed across a band of seeds so the rate is stable, not seed-luck.
+    auto brightnessMatches = [&](double influence) {
+        long matches = 0;
+        long notes = 0;
+        for (unsigned seed = 1; seed <= 40; ++seed) {
+            MelodyOptions opts;
+            opts.length = 40;
+            opts.octaveSpan = octaveSpan;
+            opts.phraseMode = PhraseMode::Phrased;
+            opts.rhythm = RhythmMode::Flowing;
+            opts.cellPath = CellPath::RandomWalk;
+            opts.arpeggioAmount = 0.0;        // no ornaments/leaps: isolate the blend
+            opts.brightnessBias = influence;  // "Image Influence"
+
+            std::mt19937 rng(seed);
+            const Melody m = generateMelody(grid, scale, opts, rng);
+
+            // Variant C (C-1/C-2) re-baseline: B phrases deliberately read
+            // their blend material from the related shadow region (possibly
+            // contrast-flipped), not from the walk cell recorded on the note,
+            // so the walk-cell reconstruction below no longer applies to them.
+            // The tracking contract is unchanged for every other walked note.
+            const std::vector<std::size_t> phraseOf =
+                phraseIndexOfNotes(m.phraseStarts, m.degrees.size());
+
+            for (std::size_t i = 0; i < m.degrees.size(); ++i) {
+                if (!m.phraseStarts.empty() &&
+                    isBPhrase(phraseOf[i], m.phraseStarts.size()))
+                    continue;
+                // Reconstruct the note's source brightness exactly as the engine
+                // sampled it: from the grid cell recorded on the note.
+                const float b = grid.valueAt(m.cells[i].col, m.cells[i].row);
+                if (m.degrees[i] == mapBrightnessToDegree(b, totalDegrees))
+                    ++matches;
+                ++notes;
+            }
+        }
+        std::printf("    [influence=%.1f] %ld/%ld notes on their brightness degree\n",
+                    influence, matches, notes);
+        return matches;
+    };
+
+    const long matchesLow = brightnessMatches(0.0);
+    const long matchesHigh = brightnessMatches(1.0);
+
+    // Sanity: the 0.0 baseline has some incidental matches to divide against
+    // (guards the "at least double" ratio below from a trivial 0-vs-0 pass).
+    CHECK(matchesLow > 0);
+    // The core assertion: Image Influence = 1.0 tracks brightness CLEARLY more
+    // than Influence = 0.0. "Clearly" = at least double the matching notes.
+    CHECK(matchesHigh > matchesLow);
+    CHECK(matchesHigh >= 2 * matchesLow);
+}
+
+// ---- Phase 3: image-driven rhythmic density ---------------------------------
+
+// Every note (start and length) lands on an integer tick of the 960 grid.
+bool allOnTickGrid(const Melody& m) {
+    constexpr double kTicks = 960.0;
+    for (const Note& n : m.notes) {
+        const double s = n.startBeats * kTicks;
+        const double l = n.lengthBeats * kTicks;
+        if (std::fabs(s - std::round(s)) > 1e-6) return false;
+        if (std::fabs(l - std::round(l)) > 1e-6) return false;
+    }
+    return true;
+}
+
+// imageRhythmAmount subdivides notes in high-contrast regions and does nothing
+// in flat ones, always on the grid, always in scale, and is a byte-exact no-op
+// at amount 0 (so the RNG stream and groove-only output are untouched).
+void test_phrased_image_density() {
+    const int cols = 16, rows = 12;
+    const Scale scale = minorPentatonic();
+    std::set<int> scalePcs;
+    for (int iv : scale.intervals) scalePcs.insert(((iv % 12) + 12) % 12);
+
+    const BrightnessGrid busy(makeCheckerboard(160, 120, 10), cols, rows);
+    const BrightnessGrid flat(makeBright(160, 120), cols, rows);
+
+    auto gen = [&](const BrightnessGrid& g, double amount, unsigned seed) {
+        MelodyOptions o;
+        o.length = 40;
+        o.phraseMode = PhraseMode::Phrased;
+        o.rhythm = RhythmMode::Flowing;
+        o.arpeggioAmount = 0.0;  // isolate density from ornaments
+        o.imageRhythmAmount = amount;
+        std::mt19937 rng(seed);
+        return generateMelody(g, scale, o, rng);
+    };
+
+    long denserSeeds = 0;
+    for (unsigned seed = 1; seed <= 40; ++seed) {
+        const Melody off = gen(busy, 0.0, seed);
+        const Melody on = gen(busy, 1.0, seed);
+
+        // Density only adds notes (post-walk, no RNG): same seed => the walk and
+        // its note count are identical, subdivisions only split existing notes.
+        CHECK(on.notes.size() >= off.notes.size());
+        if (on.notes.size() > off.notes.size()) ++denserSeeds;
+
+        // On-grid and in-scale even with maximal subdivision.
+        CHECK(allOnTickGrid(on));
+        for (const Note& n : on.notes) {
+            const int pc = ((n.noteNumber - scale.rootNote) % 12 + 12) % 12;
+            CHECK(scalePcs.count(pc) == 1);
+        }
+
+        // The split conserves total time: no beats invented or lost.
+        CHECK(std::abs(totalBeats(on) - totalBeats(off)) < 1e-6);
+
+        // A flat image has no local contrast, so density can't fire: the note
+        // count matches the amount-0 run exactly.
+        const Melody flatOff = gen(flat, 0.0, seed);
+        const Melody flatOn = gen(flat, 1.0, seed);
+        CHECK(flatOn.notes.size() == flatOff.notes.size());
+    }
+    // The checkerboard is high-contrast everywhere, so density fires broadly.
+    CHECK(denserSeeds >= 35);
+}
+
+// Regression guard: image density is a pure function of the image and draws no
+// RNG, so raising imageRhythmAmount never perturbs the walk's seed stream. Same
+// seed + image => the mt19937 is left in an identical state whatever the amount,
+// so the non-density path (pitches, rests, ornaments) reproduces bit-for-bit.
+void test_image_density_draws_no_rng() {
+    const BrightnessGrid busy(makeCheckerboard(160, 120, 10), 16, 12);
+    const Scale scale = minorPentatonic();
+    for (unsigned seed = 1; seed <= 40; ++seed) {
+        auto endState = [&](double amount) {
+            MelodyOptions o;
+            o.length = 48;
+            o.phraseMode = PhraseMode::Phrased;
+            o.rhythm = RhythmMode::Flowing;
+            o.imageRhythmAmount = amount;
+            std::mt19937 rng(seed);
+            generateMelody(busy, scale, o, rng);
+            return rng();  // one more draw reveals the post-generation state
+        };
+        const std::mt19937::result_type off = endState(0.0);
+        CHECK(endState(0.5) == off);
+        CHECK(endState(1.0) == off);
+    }
+}
+
+// Phase 3.5: image density composes MELODIC CONTENT (passing/neighbour tones),
+// not unison chops. A subdivided note's extra pieces share its source cell but
+// must move in pitch (a passing run toward the next note, or a neighbour turn),
+// while every piece stays in scale. Regression guard for the "density chops
+// instead of composing" fix.
+void test_density_composes_melodic_content() {
+    const int cols = 16, rows = 12;
+    const Scale scale = minorPentatonic();
+    std::set<int> scalePcs;
+    for (int iv : scale.intervals) scalePcs.insert(((iv % 12) + 12) % 12);
+    const BrightnessGrid busy(makeCheckerboard(160, 120, 10), cols, rows);
+
+    long splitGroups = 0;    // adjacent notes sharing a source cell (a split)
+    long movedGroups = 0;    // ...of which at least one piece moved in pitch
+    for (unsigned seed = 1; seed <= 40; ++seed) {
+        MelodyOptions o;
+        o.length = 40;
+        o.phraseMode = PhraseMode::Phrased;
+        o.rhythm = RhythmMode::Flowing;
+        o.arpeggioAmount = 0.0;
+        o.imageRhythmAmount = 1.0;
+        std::mt19937 rng(seed);
+        const Melody m = generateMelody(busy, scale, o, rng);
+
+        // Every emitted note is in scale, split or not.
+        for (const Note& n : m.notes) {
+            const int pc = ((n.noteNumber - scale.rootNote) % 12 + 12) % 12;
+            CHECK(scalePcs.count(pc) == 1);
+        }
+
+        // Walk runs of consecutive notes that share a source cell (one split
+        // group) and check the group is not a single held pitch.
+        for (std::size_t i = 1; i < m.notes.size(); ++i) {
+            const bool sameCell = m.cells[i].col == m.cells[i - 1].col &&
+                                  m.cells[i].row == m.cells[i - 1].row;
+            if (!sameCell) continue;
+            ++splitGroups;
+            if (m.degrees[i] != m.degrees[i - 1]) ++movedGroups;
+        }
+    }
+    // The checkerboard subdivides broadly, so there are plenty of split groups,
+    // and the fill moves in pitch rather than repeating one note (old chop
+    // behaviour would leave movedGroups == 0).
+    CHECK(splitGroups > 50);
+    CHECK(movedGroups > 0);
+    // At least half of all split-group steps are melodic motion, not unison.
+    CHECK(movedGroups * 2 >= splitGroups);
+}
+
+// Phase 3.5: the two-bar syncopated rhythm templates keep every note on the
+// 960-tick grid across the whole Energy range (the dotted-eighth 3-3-2 pushes
+// and long-short-short answers are all exact tick fractions). Guards against a
+// future template whose slot lengths would drift off-grid, and confirms the
+// off-beat (syncopated) onsets the phase adds still land on integer ticks so
+// the pass-2 reconciliation sees clean beats.
+void test_phrased_syncopation_on_grid() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = minorPentatonic();
+    for (double energy : {0.0, 0.25, 0.5, 0.75, 1.0}) {
+        for (unsigned seed = 1; seed <= 30; ++seed) {
+            MelodyOptions o;
+            o.length = 48;
+            o.phraseMode = PhraseMode::Phrased;
+            o.rhythm = RhythmMode::Flowing;
+            o.energy = energy;
+            std::mt19937 rng(seed);
+            const Melody m = generateMelody(grid, scale, o, rng);
+            CHECK(allOnTickGrid(m));
+        }
+    }
+}
+
 // ---- semantic axes ----------------------------------------------------------
 
 // Higher Energy raises overall velocity.
@@ -1034,9 +1712,415 @@ void test_mutate_respects_locks() {
     CHECK(anyPitchChange);
 }
 
+// ---- Phase 4b: splice-lock determinism + count matching --------------------
+
+// True if two melodies are byte-identical in the emitted note track.
+bool melodyNotesIdentical(const Melody& a, const Melody& b) {
+    if (a.notes.size() != b.notes.size()) return false;
+    for (std::size_t i = 0; i < a.notes.size(); ++i) {
+        if (a.notes[i].noteNumber != b.notes[i].noteNumber) return false;
+        if (a.notes[i].velocity != b.notes[i].velocity) return false;
+        if (a.notes[i].startBeats != b.notes[i].startBeats) return false;
+        if (a.notes[i].lengthBeats != b.notes[i].lengthBeats) return false;
+    }
+    return true;
+}
+
+// A melody with the given pitches, one quarter note each (so the timing track is
+// well-defined and distinct per index — lets a splice test read both tracks).
+Melody melodyOfPitches(const std::vector<int>& pitches) {
+    Melody m;
+    double beat = 0.0;
+    for (int p : pitches) {
+        Note n;
+        n.noteNumber = p;
+        n.velocity = 80;
+        n.startBeats = beat;
+        n.lengthBeats = 1.0;
+        m.notes.push_back(n);
+        m.degrees.push_back(0);
+        m.cells.push_back(lumena::melody::GridCell{});
+        beat += 1.0;
+    }
+    return m;
+}
+
+// Phase 4b-fix: mutate preserves the timing skeleton. A "small" mutation keeps
+// the exact bar count of its input, leaves every ONSET (and thus the inter-phrase
+// rests) untouched, keeps notes within their slots (no overlap / no span growth),
+// and is deterministic given the seed. Uses a phrased melody (real rests + a
+// defined span) at two amounts across seeds.
+void test_mutate_preserves_bar_count_and_skeleton() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = minorPentatonic();
+
+    MelodyOptions o;
+    o.phraseMode = PhraseMode::Phrased;
+    o.length = 32;
+    o.loopBars = 8;
+    o.beatsPerBar = 4.0;
+
+    auto barCount = [&](const Melody& m) {
+        double span = 0.0;
+        for (const Note& n : m.notes)
+            span = std::max(span, n.startBeats + n.lengthBeats);
+        return static_cast<int>(std::ceil(span / o.beatsPerBar - 1e-9));
+    };
+
+    for (double amt : {0.30, 0.50}) {
+        for (unsigned seed = 1; seed <= 10; ++seed) {
+            std::mt19937 g(seed);
+            const Melody base = generateMelody(grid, scale, o, g);
+            if (base.notes.empty()) continue;
+
+            std::mt19937 mr(seed + 100u);
+            const Melody mut = mutate(base, scale, { false, false }, amt, o, mr);
+
+            CHECK(mut.notes.size() == base.notes.size());   // no notes added/removed
+            CHECK(barCount(mut) == barCount(base));         // bar count invariant
+
+            bool onsetsHeld = true, withinSlots = true;
+            const double span =
+                base.notes.back().startBeats + base.notes.back().lengthBeats;
+            for (std::size_t i = 0; i < mut.notes.size(); ++i) {
+                if (mut.notes[i].startBeats != base.notes[i].startBeats)
+                    onsetsHeld = false;  // onsets (and the rests) preserved exactly
+                const double end = mut.notes[i].startBeats + mut.notes[i].lengthBeats;
+                const double limit = (i + 1 < mut.notes.size())
+                                         ? mut.notes[i + 1].startBeats
+                                         : span;
+                if (end > limit + 1e-9) withinSlots = false;  // no overlap / no growth
+            }
+            CHECK(onsetsHeld);
+            CHECK(withinSlots);
+
+            std::mt19937 mr2(seed + 100u);
+            const Melody mut2 = mutate(base, scale, { false, false }, amt, o, mr2);
+            CHECK(melodyNotesIdentical(mut, mut2));          // deterministic per seed
+        }
+    }
+}
+
+// recombineLocked draws no RNG, so identical (previous, candidate, locks) inputs
+// splice to a byte-identical melody; mutate is deterministic given its seed and
+// varies with it. This is the "Regenerate is reproducible" guarantee at the
+// splice layer (generation reproducibility is covered by test_reproducible).
+void test_splice_locks_deterministic() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = minorPentatonic();
+
+    MelodyOptions o;
+    o.phraseMode = PhraseMode::Freeform;
+    o.length = 20;
+    std::mt19937 a(3u), b(4u);
+    const Melody prev = generateMelody(grid, scale, o, a);
+    const Melody cand = generateMelody(grid, scale, o, b);
+
+    const RegenLocks lockRhythm{ true, false };
+    const Melody s1 = recombineLocked(prev, cand, scale, lockRhythm, o);
+    const Melody s2 = recombineLocked(prev, cand, scale, lockRhythm, o);
+    CHECK(melodyNotesIdentical(s1, s2));  // pure: same in -> same out
+
+    std::mt19937 m1(55u), m2(55u);
+    const Melody u1 = mutate(prev, scale, { false, false }, 0.4, o, m1);
+    const Melody u2 = mutate(prev, scale, { false, false }, 0.4, o, m2);
+    CHECK(melodyNotesIdentical(u1, u2));  // deterministic given the seed
+
+    std::mt19937 m3(77u);
+    const Melody u3 = mutate(prev, scale, { false, false }, 0.4, o, m3);
+    CHECK(!melodyNotesIdentical(u1, u3));  // and varies with the seed
+}
+
+// When the two tracks differ in length, the LOCKED track is authoritative for
+// note count, and pitches are read in order and then HELD at the last value —
+// never cycled back to pitch 0 (the pre-4b artifact). Truncates when the pitch
+// source is longer than the locked count.
+void test_splice_count_matches_and_holds_last() {
+    const Scale scale = minorPentatonic();
+    MelodyOptions o;
+
+    // Candidate SHORTER than the locked-rhythm previous: pitches run out.
+    const Melody prev = melodyOfPitches({60, 61, 62, 63, 64, 65, 66, 67});  // 8
+    const Melody cand = melodyOfPitches({70, 71, 72});                      // 3
+    const Melody lr = recombineLocked(prev, cand, scale, { true, false }, o);
+
+    CHECK(lr.notes.size() == prev.notes.size());   // locked count authoritative
+    CHECK(lr.notes[0].noteNumber == 70);
+    CHECK(lr.notes[1].noteNumber == 71);
+    CHECK(lr.notes[2].noteNumber == 72);
+    for (std::size_t i = 3; i < lr.notes.size(); ++i) {
+        CHECK(lr.notes[i].noteNumber == 72);                       // last held
+        CHECK(lr.notes[i].noteNumber != cand.notes[0].noteNumber); // NOT cycled
+    }
+    for (std::size_t i = 0; i < lr.notes.size(); ++i) {            // timing = locked
+        CHECK(lr.notes[i].startBeats == prev.notes[i].startBeats);
+        CHECK(lr.notes[i].lengthBeats == prev.notes[i].lengthBeats);
+    }
+
+    // Candidate LONGER than the locked previous: pitch track truncates.
+    const Melody prev2 = melodyOfPitches({60, 61, 62});                  // 3
+    const Melody cand2 = melodyOfPitches({70, 71, 72, 73, 74, 75});      // 6
+    const Melody lr2 = recombineLocked(prev2, cand2, scale, { true, false }, o);
+    CHECK(lr2.notes.size() == prev2.notes.size());  // 3
+    CHECK(lr2.notes[0].noteNumber == 70);
+    CHECK(lr2.notes[1].noteNumber == 71);
+    CHECK(lr2.notes[2].noteNumber == 72);
+}
+
+// Phase 4b-fix: the splice is PHRASE-AWARE. After a lock-pitch -> new-rhythm
+// recombine (timing from the candidate, pitch from the previous), each rhythm
+// phrase's FINAL slot carries the corresponding pitch phrase's FINAL pitch — so
+// the pitch source's phrase-end resolutions (4c chord-tone/cadence landings) land
+// on phrase ends of the timing track instead of drifting mid-phrase. Checked on
+// the checkerboard where both melodies are phrased (so both carry phraseStarts).
+void test_recombine_phrase_aware_alignment() {
+    const BrightnessGrid grid(makeCheckerboard(160, 120, 10), 16, 12);
+    const Scale scale = minorPentatonic();
+
+    MelodyOptions o;
+    o.phraseMode = PhraseMode::Phrased;
+    o.length = 32;
+    o.loopBars = 8;
+    o.beatsPerBar = 4.0;
+
+    std::mt19937 a(2024u), b(99u);
+    const Melody prev = generateMelody(grid, scale, o, a);
+    const Melody cand = generateMelody(grid, scale, o, b);
+    CHECK(!prev.phraseStarts.empty());
+    CHECK(!cand.phraseStarts.empty());
+
+    // Lock pitch: timing/phrases from candidate, pitch from previous.
+    const Melody out = recombineLocked(prev, cand, scale, { false, true }, o);
+    CHECK(out.notes.size() == cand.notes.size());
+    CHECK(out.phraseStarts == cand.phraseStarts);   // phrases follow the timing track
+
+    const auto& rS = cand.phraseStarts;   // rhythm phrases (output slots)
+    const auto& pS = prev.phraseStarts;   // pitch phrases
+    const std::size_t PR = rS.size(), PP = pS.size();
+    const std::size_t n = cand.notes.size(), pnn = prev.notes.size();
+    for (std::size_t p = 0; p < PR; ++p) {
+        const std::size_t rEnd = (p + 1 < PR) ? rS[p + 1] : n;
+        const std::size_t q = std::min(p, PP - 1);            // hold-last phrase
+        const std::size_t pEnd = (q + 1 < PP) ? pS[q + 1] : pnn;
+        // The phrase-final slot takes the pitch phrase's final (resolution) pitch.
+        CHECK(out.notes[rEnd - 1].noteNumber == prev.notes[pEnd - 1].noteNumber);
+    }
+
+    // Pure/deterministic: same inputs -> byte-identical.
+    const Melody out2 = recombineLocked(prev, cand, scale, { false, true }, o);
+    CHECK(melodyNotesIdentical(out, out2));
+}
+
+// ---- Phase 4b: Lock Harmony (progression as a lockable input) ---------------
+// A fresh generation records its chosen progression on Melody::progression.
+// Feeding that back via MelodyOptions::progression pins the harmony across a
+// re-generation (any seed) while pitch/rhythm re-roll; supplying the input draws
+// no RNG for the progression and actually steers the melody (chord snaps), so it
+// is not ignored. Determinism holds given a fixed seed + fixed progression.
+void test_lock_harmony_carries_progression() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = minorPentatonic();
+
+    MelodyOptions o;
+    o.length = 32;
+    o.loopBars = 8;
+
+    std::mt19937 a(2024u);
+    const Melody base = generateMelody(grid, scale, o, a);
+    CHECK(!base.progression.empty());  // harmony identity recorded
+
+    // Carry it forward with a DIFFERENT seed: progression identical, notes re-roll.
+    MelodyOptions locked = o;
+    locked.progression = base.progression;
+    std::mt19937 b(777u);
+    const Melody regen = generateMelody(grid, scale, locked, b);
+    CHECK(regen.progression == base.progression);   // harmony pinned across regen
+
+    // Determinism: same seed + same explicit progression -> byte-identical.
+    std::mt19937 c1(777u), c2(777u);
+    const Melody r1 = generateMelody(grid, scale, locked, c1);
+    const Melody r2 = generateMelody(grid, scale, locked, c2);
+    CHECK(melodyNotesIdentical(r1, r2));
+
+    // The input is honoured, not ignored: SAME seed, two different progressions
+    // produce different harmony and different notes (chord snaps follow it).
+    MelodyOptions progX = o, progY = o;
+    progX.progression = {0, 3, 4, 5};   // I-IV-V-vi
+    progY.progression = {5, 3, 0, 4};   // vi-IV-I-V
+    std::mt19937 x(4u), y(4u);
+    const Melody mx = generateMelody(grid, scale, progX, x);
+    const Melody my = generateMelody(grid, scale, progY, y);
+    CHECK(mx.progression == progX.progression);
+    CHECK(my.progression == progY.progression);
+    CHECK(!melodyNotesIdentical(mx, my));
+}
+
+// Mirrors the strong-beat predicate at MelodyGenerator.cpp:537: a beat position
+// is strong iff it lands exactly on an integer beat on the tick grid. Verifies
+// the integer test classifies integer beats as strong and half-beats as weak on
+// the dyadic grid that current rhythm templates produce (multiples of 0.5).
+void test_strong_beat_tick_grid() {
+    constexpr long kTicksPerBeat = 960;  // must match MelodyGenerator.cpp
+    auto isStrong = [](double localBeat) {
+        const long tick = std::lround(localBeat * kTicksPerBeat);
+        return (tick % kTicksPerBeat) == 0;
+    };
+
+    // Integer beats -> strong.
+    for (double beat : {0.0, 1.0, 2.0, 3.0, 4.0})
+        CHECK(isStrong(beat));
+
+    // Half-beats (off-beats) -> weak.
+    for (double beat : {0.5, 1.5, 2.5, 3.5})
+        CHECK(!isStrong(beat));
+
+    // Agrees with the old float test on the dyadic (0.5-multiple) grid: sweep
+    // every half-beat from 0 to 8 and confirm identical classification.
+    for (int half = 0; half <= 16; ++half) {
+        const double beat = 0.5 * half;
+        const bool oldStrong =
+            std::fabs(beat - std::round(beat)) < 1e-3;
+        CHECK(isStrong(beat) == oldStrong);
+    }
+}
+
+// Phase 4.5 permanent pin — the pitch->draw coupling cure. Pitch-domain
+// inputs must never influence draw consumption or the timing/dynamics stream:
+// two generations differing ONLY in image influence (a pure pitch-domain
+// input — it moves nextBiased targets and varyMotif's image-vs-random choice,
+// nothing else) must emit the same note count and byte-identical startBeats,
+// lengthBeats and velocities. Pitches are expected to differ — that is the
+// knob working; asserted so the test cannot silently pass by comparing a
+// melody with itself. Ornaments are ON (0.15) so the historically-coupled
+// path (maybeOrnament's dirPick/shape draws and figure splice) is exercised.
+// Before 4.5-a this fails on rider seeds; it must never fail again.
+void test_pitch_domain_never_shifts_timing() {
+    const Image image = makeDiagonalGradient(160, 120);
+    const BrightnessGrid grid(image, 16, 12);
+    const Scale scale = minorPentatonic();
+
+    bool anyPitchDiff = false;
+    for (unsigned seed = 1; seed <= 40; ++seed) {
+        MelodyOptions a;
+        a.phraseMode = PhraseMode::Phrased;
+        a.rhythm = RhythmMode::Flowing;
+        a.length = 32;
+        a.loopBars = 8;
+        a.arpeggioAmount = 0.15;
+        MelodyOptions b = a;
+        a.brightnessBias = 0.0;
+        b.brightnessBias = 0.9;
+
+        std::mt19937 r1(seed);
+        std::mt19937 r2(seed);
+        const Melody ma = generateMelody(grid, scale, a, r1);
+        const Melody mb = generateMelody(grid, scale, b, r2);
+
+        CHECK(ma.notes.size() == mb.notes.size());
+        bool streamSame = ma.notes.size() == mb.notes.size();
+        for (std::size_t i = 0; streamSame && i < ma.notes.size(); ++i) {
+            if (ma.notes[i].startBeats != mb.notes[i].startBeats ||
+                ma.notes[i].lengthBeats != mb.notes[i].lengthBeats ||
+                ma.notes[i].velocity != mb.notes[i].velocity) {
+                streamSame = false;
+            }
+            if (ma.notes[i].noteNumber != mb.notes[i].noteNumber) {
+                anyPitchDiff = true;
+            }
+        }
+        CHECK(streamSame);
+    }
+    CHECK(anyPitchDiff);
+}
+
+// Phase 4.5 — honest tied anticipation, pinned in two halves.
+//
+// (1) The sliver floor: with ornaments and density off every emitted note is
+// templated (or a settle/cadence), so no duration may be shorter than an
+// eighth — a mid-slot fragment must have tied through its boundary instead of
+// emitting as a clipped sliver. Asserted across the energy range (every
+// groove).
+//
+// (2) The bar-line crossing exists: with ornaments ON (triplet figures create
+// the off-grid entries that fragments — and so anticipations — arise from),
+// somewhere across the sweep a NON-phrase-final, NON-figure note (duration
+// >= an eighth) sustains across a bar line. Structurally impossible in the
+// old two-clock world, which truncated every templated note at the boundary.
+void test_anticipation_ties_across_barlines() {
+    const Scale scale = minorPentatonic();
+
+    // (1) sliver floor, ornaments off.
+    {
+        const Image image = makeDiagonalGradient(160, 120);
+        const BrightnessGrid grid(image, 16, 12);
+        for (double energy : {0.0, 0.5, 1.0}) {
+            for (unsigned seed = 1; seed <= 20; ++seed) {
+                MelodyOptions o;
+                o.phraseMode = PhraseMode::Phrased;
+                o.rhythm = RhythmMode::Flowing;
+                o.length = 32;
+                o.loopBars = 8;
+                o.arpeggioAmount = 0.0;
+                o.imageRhythmAmount = 0.0;
+                o.energy = energy;
+                std::mt19937 rng(seed);
+                const Melody m = generateMelody(grid, scale, o, rng);
+                for (const Note& n : m.notes)
+                    CHECK(n.lengthBeats >= 0.5 - 1e-9);
+            }
+        }
+    }
+
+    // (2) a tied anticipation crossing a bar line exists somewhere in the
+    // sweep (deterministic: fixed seeds, fixed images).
+    bool anyCrossing = false;
+    const Image images[2] = {makeDiagonalGradient(160, 120),
+                             makeCheckerboard(160, 120, 10)};
+    for (const Image& image : images) {
+        const BrightnessGrid grid(image, 16, 12);
+        for (double arp : {0.15, 0.3}) {
+            for (unsigned seed = 1; seed <= 120 && !anyCrossing; ++seed) {
+                MelodyOptions o;
+                o.phraseMode = PhraseMode::Phrased;
+                o.rhythm = RhythmMode::Flowing;
+                o.length = 32;
+                o.loopBars = 8;
+                o.arpeggioAmount = arp;
+                o.imageRhythmAmount = 0.0;
+                std::mt19937 rng(seed);
+                const Melody m = generateMelody(grid, scale, o, rng);
+
+                std::set<std::size_t> phraseFinal;
+                for (std::size_t p = 0; p < m.phraseStarts.size(); ++p)
+                    phraseFinal.insert((p + 1 < m.phraseStarts.size()
+                                            ? m.phraseStarts[p + 1]
+                                            : m.notes.size()) - 1);
+                for (std::size_t i = 0; i < m.notes.size(); ++i) {
+                    if (phraseFinal.count(i)) continue;  // settles cross by design
+                    if (m.notes[i].lengthBeats < 0.5 - 1e-9) continue;  // figure
+                    const double start = m.notes[i].startBeats;
+                    const double end = start + m.notes[i].lengthBeats;
+                    if (std::floor(end / 4.0 - 1e-9) >
+                        std::floor(start / 4.0 + 1e-9))
+                        anyCrossing = true;
+                }
+            }
+            if (anyCrossing) break;
+        }
+        if (anyCrossing) break;
+    }
+    CHECK(anyCrossing);
+}
+
 }  // namespace
 
 void run_melody_generator_tests() {
+    test_strong_beat_tick_grid();
+    test_pitch_domain_never_shifts_timing();
+    test_anticipation_ties_across_barlines();
     test_random_walk_is_smooth();
     test_velocity_mapping_in_bytes();
     test_rhythm_modes();
@@ -1047,7 +2131,12 @@ void run_melody_generator_tests() {
     test_phrased_rests_between_phrases();
     test_phrased_arpeggios_in_scale();
     test_phrased_dynamics_peak_mid_phrase();
+    test_phrased_dynamics_are_smooth();
     test_phrased_ending_is_stepwise();
+    test_phrased_endings_resolve_to_chord_tone();
+    test_harmonic_minor_cadence_uses_leading_tone();
+    test_phrased_cadence_deterministic();
+    test_phrase_endings_settle_longer();
     test_cells_track_walk_freeform();
     test_cells_in_range_pure_random();
     test_cells_reproducible();
@@ -1057,8 +2146,22 @@ void run_melody_generator_tests() {
     test_loop_fills_whole_bars();
     test_arpeggiator_reproducible();
     test_chords_are_diatonic_stacks();
+    test_chords_spell_harmonic_minor_leading_tone();
+    test_arpeggio_spells_harmonic_minor_leading_tone();
+    test_arpeggio_blues_spells_in_scale_seventh();
+    test_arpeggio_resolves_to_octave();
+    test_phrased_tracks_brightness_at_high_influence();
+    test_phrased_image_density();
+    test_image_density_draws_no_rng();
+    test_density_composes_melodic_content();
+    test_phrased_syncopation_on_grid();
     test_energy_raises_velocity();
     test_repetition_repeats_motif();
     test_recombine_locks_dimensions();
     test_mutate_respects_locks();
+    test_mutate_preserves_bar_count_and_skeleton();
+    test_splice_locks_deterministic();
+    test_splice_count_matches_and_holds_last();
+    test_recombine_phrase_aware_alignment();
+    test_lock_harmony_carries_progression();
 }

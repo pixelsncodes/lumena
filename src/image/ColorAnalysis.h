@@ -19,7 +19,7 @@ struct Hsv {
 struct ColorSummary {
     double hue = 0.0;         ///< Circularly averaged hue, degrees [0, 360).
     double saturation = 0.0;  ///< Mean per-pixel saturation, [0, 1].
-    double value = 0.0;       ///< Mean per-pixel luminance (Rec.601), [0, 1].
+    double value = 0.0;       ///< Mean per-pixel luminance (Rec.709), [0, 1].
 };
 
 /// Converts an 8-bit RGB triple to HSV.
@@ -34,8 +34,8 @@ Hsv rgbToHsv(std::uint8_t r, std::uint8_t g, std::uint8_t b) noexcept;
 /// Each pixel's contribution to the hue average is weighted by its saturation,
 /// so near-gray pixels barely influence the result and a fully desaturated
 /// image yields a hue of 0 with saturation ~0. Saturation itself is the plain
-/// per-pixel mean, and `value` is the plain per-pixel mean Rec.601 luminance
-/// (0.299R + 0.587G + 0.114B). An empty image returns {0, 0, 0}.
+/// per-pixel mean, and `value` is the plain per-pixel mean Rec.709 luminance
+/// (0.2126R + 0.7152G + 0.0722B). An empty image returns {0, 0, 0}.
 ColorSummary averageHueSaturation(const Image& image) noexcept;
 
 } // namespace lumena::image
