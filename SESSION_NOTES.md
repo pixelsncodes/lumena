@@ -1,3 +1,12 @@
+# 2026-07-10 — Queue item 0: AGENT_RULES.md revised (docs-only)
+
+Queue item 0 — AGENT_RULES.md revised to new-world invariants; M4 added to
+gates; WSLg capability documented. Docs-only. Old-world stream-identity
+rules moved (not deleted) to a "Historical — pre-Phase-4.5 clock" section;
+current law = same-seed determinism ×2, the `test_pitch_domain_never_shifts_timing`
+pin, musical invariants; gates = M2 + M4, M1 report-only, M3
+descriptive-only.
+
 # Phase 4.5 — Session 5: ACCEPTED and MERGED (+ padToWholeBars form-bar rule)
 
 Ear verdict: **PASS** — register continuity fixed seed 58's cliff, all four
