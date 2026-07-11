@@ -1087,3 +1087,32 @@ soundfont (e.g. `fluidsynth -F out.wav sf2 density-*.mid`) on your end to auditi
 - Wire `imageRhythmAmount` into the plugin UI (Phase 5 surface).
 - Bug-4b (unify the `localBeat_`/`harmonyBeat_` walk clock with the real beat so
   pass 1 needs no pass-2 reconciliation) remains deferred to Phase 4.
+
+---
+
+# Docs session — README "the math" section
+
+Added a **"How the melody engine works: the math"** section to `README.md`
+(between the Pipeline table and Requirements). DOCS ONLY — no code, no test, no
+build-config touched. Written to match the parent Lumen README's technical
+register (the parent README has no dedicated math section, so the tone/depth was
+matched to its "Lens — image to tone" explanatory style).
+
+Every equation/mapping is derived from the current post-Phase-4.5 code and cites
+the file + function it comes from. Covers: image features (luma709 grid,
+Absolute/Stretched normalisation, saturation-weighted circular hue mean, local
+contrast/imageDetail); key/scale selection (circle-of-fifths position,
+`chooseScaleType` tuned tree); the feature→parameter maps (velocity, register
+target, flowing duration, density subdivisions, groove `activity` weighting,
+contour slope, motif transpose); the theory-weighted Markov chain
+(`fromTheory` matrix, leap-resolution / third-repeat dynamic row, `nextBiased`
+image blend, `noteAt`); the harmonic frame (6 pop templates, per-bar triad
+spelling, strong-beat 0.6 snap); phrase form (A/A′/B/cadence loop, `varyMotif`,
+cadence rules, C-1 related-region window, C-3 open B cadence); the 960-tick
+plan-then-walk clock (`barAlignedDuration`, honest tied anticipation, register
+continuity 4.5-d/4.5-e three-part fold); and determinism (borrowed mt19937,
+pitch-never-touches-stream firewall pinned by
+`test_pitch_domain_never_shifts_timing`, SMF note-off-before-note-on). Pre-4.5
+two-clock mechanics mentioned only as a one-line historical note.
+
+Each stated formula was re-checked against its cited code line in a second pass.
