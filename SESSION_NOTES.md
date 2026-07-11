@@ -1,3 +1,34 @@
+# 2026-07-11 — README 'the math' section recast to Lumen Scan-mode template (docs-only)
+
+Reformat only — no math re-derived. The existing code-cited math section (8
+numbered subsections, monospace code-block equations, Lens-prose register)
+was recast into the parent Lumen README's Scan-mode house style: six labelled
+subsections (A Image Analysis, B Key & Scale, C Contour & Density, D Markov
+Selection, E The Clock, F Determinism), each an internally-numbered list of
+bold steps, one plain sentence of context + one centred LaTeX display equation
+per step, tuned constants named honestly in-line. Opened with a 2–3 sentence
+plain-language paragraph for non-technical readers.
+
+Formula set preserved exactly: all 36 formulas carried over 1:1 with their
+file·function citations; none dropped, none added. Re-bucketing 8→6: old §5
+(harmonic frame: progression, per-bar triad spelling, strong-beat chord snap)
+and old §6 (phrase form: form loop, motif rein, cadence, C-1, C-3) both folded
+into **E. The Clock**, which the brief's six-bucket scheme lodges cadence/phrase
+form/C-1 under — E is where bar-aligned chord tiling, strong-beat snap and
+cadence-to-chord-tone cohere. Register continuity (old §7) also lands in E.
+Historical Phase-4.5 two-clock blockquote retained verbatim.
+
+SOURCING NOTE for the human: the parent Lumen README has NO LaTeX/numbered-step
+"Scan mode" math section — its scan-mode content is prose (README.md "Lens —
+image to tone") plus the honest-constant prose at SPEC.md:130 (source of the
+brief's "0.05" / "harmonics capped at 700" examples). The brief's house-style
+spec (bold numbered steps, one centred LaTeX equation + one sentence per step,
+honestly-named constants) is fully enumerated in the brief itself, so the recast
+follows that explicit spec. Flagging in case a literal parent-README section was
+expected to exist.
+
+No source/build/test files touched. Determinism/gates untouched (docs-only).
+
 # 2026-07-10 — Queue item 0: AGENT_RULES.md revised (docs-only)
 
 Queue item 0 — AGENT_RULES.md revised to new-world invariants; M4 added to
