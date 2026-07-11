@@ -1,3 +1,30 @@
+# 2026-07-11 — README 'the math': LaTeX escaping + F2 new-world wording (docs-only)
+
+Two fixes to the recast math section, no math content changed (word-diff
+confirms every `$$…$$` equation body identical apart from the line-break token
+below; all 36 formulas, numbers, thresholds and file·function citations intact).
+
+FIX 1 — LaTeX escaping. The two `\begin{cases}` blocks (C-6 contour, D-1
+interval) used `\\[2pt]` line breaks; the optional `[2pt]` length argument
+makes GitHub's math renderer dump the whole block as literal tokens. Replaced
+`\\[2pt]` → plain `\\` (3 occurrences). Raw-byte audit first confirmed the rest
+of the section was already clean: no control-char mangling, every `\,` `\!`
+`\Big` `\operatorname` `\max` `\lfloor`/`\rfloor` `cases` correctly escaped —
+so only `[2pt]` needed removal (numbers/vars untouched).
+
+FIX 2 — new-world wording. F2 (pitch-timing firewall) justification was
+old-world ("post-draw clamp or remap"); reworded to attribute determinism to
+plan-then-walk ordering (all timing/structure draws consumed before any pitch
+exists) and to describe the compass clamp / register folds / motif rein / C-1
+window as "pitch-only and draw-free" (matching E-12's existing phrasing). The
+invariant, the equation, and the `test_pitch_domain_never_shifts_timing`
+citation are unchanged. Gate extends section-wide, so E-9's "post-draw remap"
+was also moved to "pitch-only, draw-free remap". `post-draw` / `draw-count` now
+appear NOWHERE in A–F (Historical blockquote keeps its own old-world wording, as
+allowed).
+
+No source/build/test files touched. Determinism/gates untouched (docs-only).
+
 # 2026-07-11 — README 'the math' section recast to Lumen Scan-mode template (docs-only)
 
 Reformat only — no math re-derived. The existing code-cited math section (8

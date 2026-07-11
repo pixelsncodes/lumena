@@ -141,7 +141,7 @@ $$\text{activity} = \operatorname{clamp}(0.5\,\text{energy} + 0.5\,\text{imageDe
 **6. Phrase contour.** Central differences `sₓ, s_y` around the start cell give a
 slope whose sign selects the arc (`selectContour`):
 
-$$\text{slope} = s_x + s_y \ \Rightarrow\ \begin{cases}\text{Rise} & \text{slope} > 0.03\\[2pt] \text{Fall} & \text{slope} < -0.03\\[2pt] \text{Arch} & \text{otherwise}\end{cases}$$
+$$\text{slope} = s_x + s_y \ \Rightarrow\ \begin{cases}\text{Rise} & \text{slope} > 0.03\\ \text{Fall} & \text{slope} < -0.03\\ \text{Arch} & \text{otherwise}\end{cases}$$
 
 **7. Motif variation.** A varied repeat transposes by a small image-driven delta,
 then reined to ±1 degree to stay recognisable (`varyMotif`):
@@ -158,7 +158,7 @@ Defaults (`markov/TheoryWeights.h`): `intervalDecay 0.5`, `repeatWeight 0.5`,
 **1. Interval weight.** Stepwise motion is likeliest via geometric decay, so leaps
 get rarer with distance `dist = |i−j|` (`markov/TransitionMatrix.cpp · fromTheory`):
 
-$$\text{interval} = \begin{cases}\text{repeatWeight} & \text{dist} = 0\\[2pt] \text{intervalDecay}^{\,\text{dist}-1} & \text{dist} > 0\end{cases}$$
+$$\text{interval} = \begin{cases}\text{repeatWeight} & \text{dist} = 0\\ \text{intervalDecay}^{\,\text{dist}-1} & \text{dist} > 0\end{cases}$$
 
 **2. Gravity toward tonic and centre.** Degrees drift gently toward the tonic and
 the middle of the range instead of stranding at the extremes (`fromTheory`):
@@ -244,7 +244,7 @@ $$\text{transpose reined to } \pm 1\ \text{degree}, \qquad \Pr[\text{octave lift
 
 **9. Related-region window (C-1).** B teleports to a random cell (two draws) but
 reads its *pitch material* from a shadow cell remapped into a window of half-width
-`W` around motif A's anchor — a post-draw remap that never perturbs the stream
+`W` around motif A's anchor — a pitch-only, draw-free remap that never perturbs the stream
 (`planPhraseCells`, `stepCell`):
 
 $$W = \max\!\Big(1,\ \frac{2\,\text{columns}}{16}\Big)$$
@@ -280,10 +280,11 @@ so the caller's seed alone determines the stream (`generateMelody`):
 
 $$(\text{image bytes},\ \text{settings},\ \text{seed}) \ \longmapsto\ \text{MIDI} \qquad \text{(byte-identical, any machine)}$$
 
-**2. Pitch-timing firewall.** Every place the image or a melodic choice could bend
-the result does so through a post-draw clamp or remap (the compass clamp, register
-folds, motif rein, and the C-1 window are all of this form), so the count and order
-of draws are a pure function of the timing/structure domain — pinned by
+**2. Pitch-timing firewall.** Because every timing and structural draw is consumed
+before any pitch exists (plan-then-walk, **E**), the count and order of draws are a
+pure function of the timing/structure domain; the compass clamp, register folds,
+motif rein, and the C-1 window are all pitch-only and draw-free, so no melodic
+choice can bend the stream — pinned by
 `tests/MelodyGeneratorTests.cpp · test_pitch_domain_never_shifts_timing`:
 
 $$\#\{\text{draws}\},\ \text{order} = f(\text{timing/structure domain only}) \quad\Rightarrow\quad \text{pitch} \not\to \text{RNG stream}$$
