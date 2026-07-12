@@ -1,3 +1,16 @@
+# 2026-07-11 — Docs-only: GitHub math reserved char fix (F.2 firewall)
+
+One-character-class fix, no code/test/build changes. In README section F
+(Determinism), step 2 (pitch-timing firewall), the cardinality expression
+`\#\{\text{draws}\}` used `#`, a reserved macro-parameter character that
+GitHub rejects in math mode ("You can't use 'macro parameter character #'").
+Replaced with `N_{\text{draws}}` — meaning ("number of draws") and the rest
+of the equation unchanged. Audited every `$$` block for other raw reserved
+characters (# $ % & _ ^ { } ~ \ meant literally): none found; the `&` in the
+two `\begin{cases}` blocks are legitimate column separators, not literals.
+
+---
+
 # 2026-07-11 — Docs-only: GitHub math macros + AGENT_RULES golden wording
 
 Two documentation fixes, no code/test/build changes. Both repos got a docs

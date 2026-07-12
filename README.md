@@ -287,7 +287,7 @@ motif rein, and the C-1 window are all pitch-only and draw-free, so no melodic
 choice can bend the stream — pinned by
 `tests/MelodyGeneratorTests.cpp · test_pitch_domain_never_shifts_timing`:
 
-$$\#\{\text{draws}\},\ \text{order} = f(\text{timing/structure domain only}) \quad\Rightarrow\quad \text{pitch} \not\to \text{RNG stream}$$
+$$N_{\text{draws}},\ \text{order} = f(\text{timing/structure domain only}) \quad\Rightarrow\quad \text{pitch} \not\to \text{RNG stream}$$
 
 **3. Byte-identical serialisation.** A dependency-free Standard MIDI File writer
 resolves beat-timed notes to a tick timeline and stably sorts events so note-offs
