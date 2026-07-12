@@ -80,7 +80,7 @@ pixel, each hue vector weighted by its saturation `s` so greys barely vote and t
 mean tracks the image's real colour (`image/ColorAnalysis.cpp · averageHueSaturation`,
 per-pixel `rgbToHsv`):
 
-$$\text{hue} = \operatorname{atan2}\!\Big(\sum_p s_p \sin\theta_p,\ \sum_p s_p \cos\theta_p\Big), \qquad \text{saturation} = \overline{s}, \qquad \text{value} = \overline{L/255}$$
+$$\text{hue} = \mathrm{atan2}\!\Big(\sum_p s_p \sin\theta_p,\ \sum_p s_p \cos\theta_p\Big), \qquad \text{saturation} = \overline{s}, \qquad \text{value} = \overline{L/255}$$
 
 **4. Local contrast and image detail.** Edge strength at a cell is the brightness
 range over its 8-connected, wrapped-edge neighbourhood, and its grid mean is a
@@ -94,7 +94,7 @@ $$\text{contrast} = \max_{\mathcal{N}} L - \min_{\mathcal{N}} L, \qquad \text{im
 **1. Root from hue via the circle of fifths.** Hue steps around the circle of
 fifths in 30° increments to fix the tonic pitch class in octave 4 (`scales/KeySelector.cpp`):
 
-$$\text{position} = \operatorname{round}(\text{hue}/30) \bmod 12, \qquad \text{rootNote} = 60 + (7\cdot\text{position} \bmod 12)$$
+$$\text{position} = \mathrm{round}(\text{hue}/30) \bmod 12, \qquad \text{rootNote} = 60 + (7\cdot\text{position} \bmod 12)$$
 
 **2. Scale-type decision tree.** `chooseScaleType(saturation, value)` is a tuned
 heuristic, not a theory — its thresholds are audition constants: saturation `<
@@ -104,7 +104,7 @@ if `value ≥ 0.5` else minor; `≥ 0.70` (vivid) and dark is harmonic minor if 
 the dark→bright axis over `[Phrygian, Aeolian, Dorian, Mixolydian, Ionian, Lydian]`
 (`chooseScaleType`):
 
-$$\text{idx} = \operatorname{clamp}(\lfloor 6\cdot\text{value} \rfloor, 0, 5)$$
+$$\text{idx} = \mathrm{clamp}(\lfloor 6\cdot\text{value} \rfloor, 0, 5)$$
 
 ### C. Contour & Density
 
@@ -116,12 +116,12 @@ followed versus the chain's own preference (see **D**).
 **1. Velocity from brightness.** Brightness sets a base velocity in `[50, 115]`,
 then Energy scales it (`brightnessToVelocity`, `applyEnergy`):
 
-$$\text{velocity} = \big(50 + \operatorname{round}(65\,b)\big)\cdot(0.7 + 0.6\,\text{energy})$$
+$$\text{velocity} = \big(50 + \mathrm{round}(65\,b)\big)\cdot(0.7 + 0.6\,\text{energy})$$
 
 **2. Register / contour target.** Brightness maps linearly onto a scale degree
 across the whole compass of `N` degrees (`scales/ScaleLibrary.cpp · mapBrightnessToDegree`):
 
-$$\text{degree} = \operatorname{clamp}(\lfloor b\cdot\text{totalDegrees}\rfloor, 0, N-1)$$
+$$\text{degree} = \mathrm{clamp}(\lfloor b\cdot\text{totalDegrees}\rfloor, 0, N-1)$$
 
 **3. Note length (Flowing).** A note length is drawn from three beat values with
 brightness-tilted weights — dark leans long, bright leans short (`flowingDuration`):
@@ -131,12 +131,12 @@ $$w\big(\{0.5,\ 1.0,\ 2.0\}\ \text{beats}\big) = \{\,0.15 + b,\ \ 0.60,\ \ 0.15 
 **4. Rhythmic density.** Local contrast splits a note into up to four equal pieces
 (`densitySubdivisionsWanted`):
 
-$$\text{pieces} = 1 + \operatorname{clamp}\!\big(\operatorname{round}(3\,\text{contrast}\cdot\text{amount}),\ 0,\ 3\big)$$
+$$\text{pieces} = 1 + \mathrm{clamp}\!\big(\mathrm{round}(3\,\text{contrast}\cdot\text{amount}),\ 0,\ 3\big)$$
 
 **5. Groove choice.** An activity scalar weights the rhythm templates by cubed
 match, so the closest-energy groove dominates (`pickRhythmTemplate`):
 
-$$\text{activity} = \operatorname{clamp}(0.5\,\text{energy} + 0.5\,\text{imageDetail}), \qquad w_i = 0.04 + \text{match}_i^{\,3}, \qquad \text{match}_i = 1 - \Big|\text{activity} - \tfrac{i}{N-1}\Big|$$
+$$\text{activity} = \mathrm{clamp}(0.5\,\text{energy} + 0.5\,\text{imageDetail}), \qquad w_i = 0.04 + \text{match}_i^{\,3}, \qquad \text{match}_i = 1 - \Big|\text{activity} - \tfrac{i}{N-1}\Big|$$
 
 **6. Phrase contour.** Central differences `sₓ, s_y` around the start cell give a
 slope whose sign selects the arc (`selectContour`):
@@ -146,7 +146,7 @@ $$\text{slope} = s_x + s_y \ \Rightarrow\ \begin{cases}\text{Rise} & \text{slope
 **7. Motif variation.** A varied repeat transposes by a small image-driven delta,
 then reined to ±1 degree to stay recognisable (`varyMotif`):
 
-$$\Delta = \operatorname{clamp}(\text{imageDeg} - \text{anchor},\ -2,\ +2) \quad \text{(then reined to } \pm 1)$$
+$$\Delta = \mathrm{clamp}(\text{imageDeg} - \text{anchor},\ -2,\ +2) \quad \text{(then reined to } \pm 1)$$
 
 ### D. Markov Selection
 

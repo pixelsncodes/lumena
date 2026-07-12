@@ -1,3 +1,29 @@
+# 2026-07-11 — Docs-only: GitHub math macros + AGENT_RULES golden wording
+
+Two documentation fixes, no code/test/build changes. Both repos got a docs
+commit; submodule pointer bumped in parent.
+
+**Fix 1 — README math renders on GitHub (submodule).** GitHub's `$$` MathJax
+rejects `\operatorname`. Replaced all 9 `\operatorname{X}` in the "How the
+melody engine works: the math" section with `\mathrm{X}` (atan2, round×3,
+clamp×5) — macro substitution only, zero changes to numbers, variables, or
+equation content (verified by `--word-diff`: only the macro token differs on
+each `$$` line). Audited every remaining backslash-macro in the section; all
+are GitHub-permitted: `\Big \Delta \Pr \Rightarrow \begin \big \bmod \cdot
+\cos \delta \end \frac \ge \iff \in \le \left \lfloor \longmapsto \lor
+\mathcal \max \mid \min \not \overline \pm \prec \propto \qquad \quad \rfloor
+\right \sin \sum \text \textbf \tfrac \theta \times \to` (plus the new
+`\mathrm`).
+
+**Fix 2 — AGENT_RULES wavetable-golden wording (parent).** Corrected the
+standing rule: the wavetable SHA-256 golden diverges ONLY on Linux
+(floating-point), is pre-existing, and may be ignored on Linux runs only — on
+Windows it PASSES and counts. Called out that it is a SEPARATE test from the
+seed-2024 melody-MIDI export hash (2e37a1d9…3670), which remains a hard gate
+that must always genuinely pass. Prevents conflating the two.
+
+---
+
 # 2026-07-11 — PROMOTION TO MAIN (both repos), human-authorized
 
 Promoted the fully-tested feature work to `main` on both repos, submodule-first.
